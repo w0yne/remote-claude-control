@@ -1,0 +1,160 @@
+"""Feishu/Lark messaging: build a client and send text/images/reactions.
+
+All functions take an explicit `client` (built by build_client) so they are
+stateless and testable. Every call is best-effort: failures are logged and
+signalled by return value, never raised, so a messaging hiccup can't crash the
+bridge loop or block a Stop hook.
+"""
+
+import json
+import logging
+
+log = logging.getLogger("ccremote.feishu")
+
+
+def build_client(app_id, app_secret):
+    """Create a Lark client. Imports lark_oapi lazily so importing this module
+    is cheap and the failure (missing dep) is localized here."""
+    import lark_oapi as lark
+
+    return lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
+
+
+def send_text(client, chat_id, text):
+    """Send a plain-text message to a chat. Returns True on confirmed send."""
+    if not client or not chat_id:
+        return False
+    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+    try:
+        resp = client.im.v1.message.create(
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("text")
+                .content(json.dumps({"text": text}))
+                .build()
+            )
+            .build()
+        )
+        return bool(resp.success())
+    except Exception as e:
+        log.error(f"send_text failed: {e}")
+        return False
+
+
+def send_image(client, chat_id, image_path):
+    """Upload an image file and send it to a chat. Returns True on confirmed send."""
+    if not client or not chat_id:
+        return False
+    from lark_oapi.api.im.v1 import (
+        CreateImageRequest,
+        CreateImageRequestBody,
+        CreateMessageRequest,
+        CreateMessageRequestBody,
+    )
+
+    try:
+        with open(image_path, "rb") as f:
+            up = client.im.v1.image.create(
+                CreateImageRequest.builder()
+                .request_body(
+                    CreateImageRequestBody.builder().image_type("message").image(f).build()
+                )
+                .build()
+            )
+        if not (up.success() and up.data and up.data.image_key):
+            log.error(f"image upload failed: code={getattr(up, 'code', '?')}")
+            return False
+        resp = client.im.v1.message.create(
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("image")
+                .content(json.dumps({"image_key": up.data.image_key}))
+                .build()
+            )
+            .build()
+        )
+        return bool(resp.success())
+    except Exception as e:
+        log.error(f"send_image failed: {e}")
+        return False
+
+
+def add_reaction(client, message_id, emoji_type):
+    """Add an emoji reaction. Returns reaction_id or None."""
+    if not client or not message_id:
+        return None
+    from lark_oapi.api.im.v1 import (
+        CreateMessageReactionRequest,
+        CreateMessageReactionRequestBody,
+        Emoji,
+    )
+
+    try:
+        resp = client.im.v1.message_reaction.create(
+            CreateMessageReactionRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                CreateMessageReactionRequestBody.builder()
+                .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
+                .build()
+            )
+            .build()
+        )
+        if resp.success() and resp.data:
+            return resp.data.reaction_id
+        log.error(f"add_reaction {emoji_type} failed: code={getattr(resp, 'code', '?')}")
+        return None
+    except Exception as e:
+        log.error(f"add_reaction error: {e}")
+        return None
+
+
+def del_reaction(client, message_id, reaction_id):
+    """Best-effort remove a reaction."""
+    if not client or not message_id or not reaction_id:
+        return
+    from lark_oapi.api.im.v1 import DeleteMessageReactionRequest
+
+    try:
+        client.im.v1.message_reaction.delete(
+            DeleteMessageReactionRequest.builder()
+            .message_id(message_id)
+            .reaction_id(reaction_id)
+            .build()
+        )
+    except Exception as e:
+        log.error(f"del_reaction error: {e}")
+
+
+def download_image(client, message_id, image_key, dest_path):
+    """Download a message image resource to dest_path. Returns dest_path or None.
+    Requires the im:resource permission."""
+    if not client or not message_id or not image_key:
+        return None
+    from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+    try:
+        resp = client.im.v1.message_resource.get(
+            GetMessageResourceRequest.builder()
+            .message_id(message_id)
+            .file_key(image_key)
+            .type("image")
+            .build()
+        )
+        if not resp.success() or resp.file is None:
+            log.error(f"image download failed: code={getattr(resp, 'code', '?')}")
+            return None
+        with open(dest_path, "wb") as f:
+            f.write(resp.file.read())
+        log.info(f"Image saved: {dest_path}")
+        return dest_path
+    except Exception as e:
+        log.error(f"download_image error: {e}")
+        return None

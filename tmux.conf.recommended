@@ -1,0 +1,40 @@
+# ============================================
+# tmux 推荐配置 - 优化滚动和使用体验
+# 将此文件内容追加到远程 Mac 的 ~/.tmux.conf
+# ============================================
+
+# --- 鼠标支持（触控板滚动） ---
+set -g mouse on
+
+# --- 历史记录 ---
+set -g history-limit 50000
+
+# --- 滚动优化 ---
+# 进入 copy mode 后可用触控板/鼠标滚轮翻页
+bind -T copy-mode-vi WheelUpPane send-keys -X halfpage-up
+bind -T copy-mode-vi WheelDownPane send-keys -X halfpage-down
+
+# --- 使用 vi 模式浏览（更直觉的上下翻页） ---
+setw -g mode-keys vi
+
+# --- 快捷键 ---
+# Ctrl+B then [ 进入滚动模式
+# q 退出滚动模式
+# / 搜索（vi mode）
+# Ctrl+U / Ctrl+D 半页上下翻
+
+# --- 状态栏美化 ---
+set -g status-style 'bg=#333333 fg=#ffffff'
+set -g status-left '[#S] '
+set -g status-right '%H:%M'
+
+# --- 终端颜色 ---
+set -g default-terminal "screen-256color"
+set -ga terminal-overrides ",xterm-256color:Tc"
+
+# --- 减少 escape 延迟（vim 用户必备） ---
+set -sg escape-time 10
+
+# --- 窗口编号从 1 开始 ---
+set -g base-index 1
+setw -g pane-base-index 1
