@@ -477,6 +477,12 @@ def cmd_doctor(args):
           "brew install charmbracelet/tap/freeze")
     check("cwebp installed", bool(shutil.which("cwebp")), "brew install webp")
     check("tmux installed", bool(shutil.which("tmux")), "brew install tmux")
+    # The thing we actually drive: the launcher from CLAUDE_CMD (default "claude").
+    # First token so "claude --resume ..." or an absolute path both resolve.
+    claude_bin = (_env().get("CLAUDE_CMD") or "claude").split()[0]
+    check(f"claude launcher on PATH ({claude_bin})", bool(shutil.which(claude_bin)),
+          "install & log in to Claude Code first (npm i -g @anthropic-ai/claude-code), "
+          "or set CLAUDE_CMD in ~/.cc_remote/.env")
     pybin = _pybin()
     check(f"bridge interpreter has lark_oapi ({pybin})", _py_has("lark_oapi", pybin),
           "set CC_HOOK_PYTHON to a python with: pip install lark-oapi python-dotenv")
