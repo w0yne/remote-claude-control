@@ -61,14 +61,15 @@ cc-remote bridge status|stop
 
 | 命令 | 作用 |
 |------|------|
-| `/read` | 截取当前终端屏幕并以图片发回（解卡时看为什么卡住）|
-| `/status` | 查看 tmux session 是否在线 |
+| `/read` | 截取**当前 active 项目**的终端屏幕并以图片发回（解卡时看为什么卡住）|
+| `/status` | 查看当前 active 项目的 session 名、是否在线 |
+| `/switch <别名>` | 切换当前 active 项目（多项目路由，见下节）|
+| `/projects` | 列出已注册项目，★ 标记当前 active |
 | `/enter` | 在终端按回车（确认弹窗 / 选 Yes / 提交）|
 | `/esc` | 在终端按 ESC（取消弹窗 / 退出模式）|
 | `/up` `/down` | 在终端按上/下方向键（在多选弹窗里移动光标）|
 | `/ctrl-c` | 在终端按 Ctrl+C（中断当前运行）|
-| `/help` | 帮助 |
-| 普通文字 | 转发到活跃机器的 tmux |
+| 普通文字 | 转发到当前 active 项目的 tmux session |
 | `# ...` | 备注，不转发 |
 
 > 控制键（`/enter` `/esc` `/up` `/down` `/ctrl-c`）是远程托底:即便开了 bypass，万一某个
@@ -77,6 +78,30 @@ cc-remote bridge status|stop
 > 控制键还会**按需补信号**:若当前没有任何命令在等待截图(例如你在电脑上敲好提示词、
 > 再从飞书 `/enter` 启动 Claude),控制键会顺手挂一个信号,让 Claude 跑完后把结果截图
 > 回传到这条控制键消息;若已有命令在等(从飞书发起的),则只推进它、不重复。
+
+## 多项目路由（/switch）
+
+一个 bridge 可以管多个项目，每个项目是一个长驻 tmux session（各自独立的 Claude + 上下文）。
+飞书消息默认发给**当前 active 项目**；用 `/switch` 改变路由指向，`/projects` 查看列表。
+
+```bash
+# 给项目起别名并配 hook（在项目目录下；--name 即注册进多项目 registry）
+cd ~/dev/projectA
+cc-remote setup --name projA                 # session 名默认取别名，可用 --session 覆盖
+
+# 注册一个已经在跑的 session（不碰它的 settings.json / 不重起 tmux）
+cc-remote projects add projB --session cc-projB --dir ~/dev/projectB
+
+cc-remote projects list                      # 列出所有项目 + 在线状态
+cc-remote projects rm projB                   # 注销
+```
+
+飞书端：
+
+- `/projects` —— 列出已注册项目，★ 标记当前 active，●live/○dead 标在线状态。
+- `/switch <别名>` —— 把 active 指针切到该项目；之后普通文字、`/read`、控制键都路由到它。
+  - 目标 session 必须已在运行（Phase A：`/switch` 只改路由，不会替你起/恢复 session）。
+- 不带 `--name` 的 `setup` 仍是单项目模式（兼容老行为），消息路由到 `TMUX_SESSION`（默认 `cc`）。
 
 ## 飞书应用配置
 
@@ -95,7 +120,7 @@ cc-remote bridge status|stop
 
 ## 发图给 Claude
 
-私聊机器人**发图片** → 自动下载到 `CC_REMOTE_DIR/images/` → 机器人回执「📷 已接收」。
+私聊机器人**发图片** → 自动下载到 `CC_REMOTE_DIR/images/` → 机器人回执「📷 图片已接收 (共 N 张待处理)」。
 **下一条文字**消息会自动带上这些图片路径（`[图片] <路径>`），Claude Code 即可用 Read 读图。
 多张图会累加，直到被下一条文字消费。
 

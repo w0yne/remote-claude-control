@@ -1,0 +1,5 @@
+# Extra deps for the experimental multi-machine hub/agent mode only.
+# The single-machine tool (top-level requirements.txt) does NOT need these.
+lark-oapi>=1.4.0
+python-dotenv>=1.0.0
+aiohttp>=3.9.0

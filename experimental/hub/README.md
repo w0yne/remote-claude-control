@@ -18,6 +18,7 @@ switching the active machine with `/use <name>`.
 - `hub.py` — connects to Feishu, registers agents, routes `/use` / `/list` / `/read`.
 - `agent.py` — runs on each remote machine, connects to the Hub, drives local tmux.
 - `.env.hub.example` / `.env.agent.example` — config templates.
+- `requirements.txt` — hub-mode deps (adds `aiohttp` on top of the single-machine deps; `pip install -r experimental/hub/requirements.txt`).
 
 ## Before relying on this
 
