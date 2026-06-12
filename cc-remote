@@ -201,16 +201,13 @@ def cmd_install(args):
     else:
         print(f"ℹ️  kept existing {ENV_FILE}")
 
-    # Dependency hints.
-    for tool, hint in [("freeze", "brew install charmbracelet/tap/freeze"),
-                       ("cwebp", "brew install webp"),
-                       ("tmux", "brew install tmux")]:
+    # Dependency hints (platform-aware: brew on macOS, dnf/apt on Linux).
+    backend = _backend()
+    for tool, hint in backend.tool_hints():
         if not shutil.which(tool):
             print(f"⚠️  missing {tool} → {hint}")
-    for mod, hint in [("lark_oapi", "pip install lark-oapi"),
-                      ("dotenv", "pip install python-dotenv")]:
-        if not _py_has(mod):
-            print(f"⚠️  missing python {mod} → {hint}")
+    if not _py_has("lark_oapi") or not _py_has("dotenv"):
+        print(f"⚠️  missing python deps → {backend.python_dep_note()}")
 
     print("\nNext:")
     print(f"  1. Fill in {ENV_FILE} (Feishu APP_ID/SECRET, ALLOWED_USERS)")
@@ -436,6 +433,14 @@ def cmd_doctor(args):
     stray = backend.stray_processes()
     if stray:
         print(f"   ⚠️ stray (unmanaged) bridge(s): {', '.join(stray)} (kill to avoid conflicts)")
+    # Linux daemon sets LANG/LC_ALL=en_US.UTF-8; warn if that locale is absent
+    # (an inert locale → CJK text/path crashes under systemd). No-op on macOS.
+    if backend.name == "linux":
+        loc = subprocess.run(["locale", "-a"], capture_output=True, text=True)
+        has_utf8 = any("en_us.utf8" in l.lower() or "c.utf-8" in l.lower()
+                       for l in loc.stdout.splitlines())
+        check("en_US.UTF-8 locale present", has_utf8,
+              "sudo locale-gen en_US.UTF-8  (Ubuntu) — prevents CJK crashes under systemd")
 
     # Current dir configured for the hook? Match OUR hook command, not just any
     # Stop hook. Gated into `ok` via check().
