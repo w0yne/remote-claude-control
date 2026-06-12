@@ -32,6 +32,27 @@ def _parse_launchctl_list(text, returncode):
                         pid=pid, last_exit=last_exit)
 
 
+def _render_plist(pybin, bridge_py, workdir, log_path):
+    """Return the plist bytes for the LaunchAgent (matches the original
+    cc-remote _write_plist exactly)."""
+    plist = {
+        "Label": LAUNCHD_LABEL,
+        "ProgramArguments": [pybin, bridge_py],
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 10,
+        "WorkingDirectory": workdir,
+        "StandardOutPath": log_path,
+        "StandardErrorPath": log_path,
+        "EnvironmentVariables": {
+            "PATH": _DAEMON_PATH,
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+        },
+    }
+    return plistlib.dumps(plist)
+
+
 class LaunchdBackend(ServiceBackend):
     name = "darwin"
     service_label = LAUNCHD_LABEL
@@ -56,3 +77,33 @@ class LaunchdBackend(ServiceBackend):
         out = subprocess.run(["launchctl", "list", LAUNCHD_LABEL],
                              capture_output=True, text=True)
         return _parse_launchctl_list(out.stdout, out.returncode)
+
+    def start(self, pybin, bridge_py, workdir, env_file, log_path):
+        os.makedirs(os.path.dirname(PLIST_PATH), exist_ok=True)
+        with open(PLIST_PATH, "wb") as f:
+            f.write(_render_plist(pybin, bridge_py, workdir, log_path))
+        uid = os.getuid()
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}", PLIST_PATH],
+                       capture_output=True)
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", PLIST_PATH],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return ServiceResult(False, f"launchctl bootstrap failed: {r.stderr.strip()} "
+                                        f"(plist at {PLIST_PATH})")
+        return ServiceResult(True, f"started via launchd ({LAUNCHD_LABEL})")
+
+    def stop(self):
+        uid = os.getuid()
+        r = subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            subprocess.run(["launchctl", "bootout", f"gui/{uid}", PLIST_PATH],
+                           capture_output=True)
+        if not self.state().loaded:
+            return ServiceResult(True, "stopped")
+        return ServiceResult(False, "launchd job still loaded — try again")
+
+    def stray_processes(self):
+        managed = self.state().pid
+        managed_s = str(managed) if managed else None
+        return [p for p in _pgrep_bridge() if p != managed_s]

@@ -68,3 +68,34 @@ def test_parse_launchctl_not_loaded():
     assert st.loaded is False
     assert st.running is False
     assert st.pid is None
+
+
+import plistlib
+from ccremote.platform.darwin import _render_plist
+
+
+def test_render_plist_fields():
+    pl = _render_plist(
+        pybin="/usr/bin/python3", bridge_py="/home/me/.cc_remote/bin/bridge.py",
+        workdir="/home/me/.cc_remote", log_path="/home/me/.cc_remote/bridge.log",
+    )
+    d = plistlib.loads(pl)
+    assert d["Label"] == "com.ccremote.bridge"
+    assert d["ProgramArguments"] == ["/usr/bin/python3", "/home/me/.cc_remote/bin/bridge.py"]
+    assert d["RunAtLoad"] is True
+    assert d["KeepAlive"] == {"SuccessfulExit": False}
+    assert d["ThrottleInterval"] == 10
+    assert d["WorkingDirectory"] == "/home/me/.cc_remote"
+    assert d["StandardOutPath"] == "/home/me/.cc_remote/bridge.log"
+    assert d["StandardErrorPath"] == "/home/me/.cc_remote/bridge.log"
+    assert d["EnvironmentVariables"]["PATH"] == "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    assert d["EnvironmentVariables"]["LANG"] == "en_US.UTF-8"
+    assert d["EnvironmentVariables"]["LC_ALL"] == "en_US.UTF-8"
+
+
+def test_stray_processes_excludes_managed(monkeypatch):
+    import ccremote.platform.darwin as dw
+    monkeypatch.setattr(dw, "_pgrep_bridge", lambda: ["100", "200"])
+    b = dw.LaunchdBackend()
+    monkeypatch.setattr(b, "state", lambda: dw.ServiceState(loaded=True, running=True, pid=100))
+    assert b.stray_processes() == ["200"]
