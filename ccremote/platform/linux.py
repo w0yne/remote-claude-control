@@ -34,6 +34,36 @@ def _distro_id():
         return ""
 
 
+def _render_unit(user, pybin, bridge_py, workdir, env_file, log_path, daemon_path):
+    """Render the systemd system-service unit. All paths must be absolute —
+    systemd does no ~ or env expansion. Mapping from the macOS launchd plist is
+    documented in the facts brief."""
+    return (
+        "[Unit]\n"
+        "Description=cc-remote Feishu bridge (WebSocket client daemon)\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"User={user}\n"
+        f"WorkingDirectory={workdir}\n"
+        f"ExecStart={pybin} {bridge_py}\n"
+        "Restart=on-failure\n"
+        "RestartSec=10\n"
+        f"Environment=PATH={daemon_path}\n"
+        "Environment=LANG=en_US.UTF-8\n"
+        "Environment=LC_ALL=en_US.UTF-8\n"
+        f"EnvironmentFile=-{env_file}\n"
+        f"StandardOutput=append:{log_path}\n"
+        f"StandardError=append:{log_path}\n"
+        "SyslogIdentifier=ccremote-bridge\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
 class SystemdBackend(ServiceBackend):
     name = "linux"
     service_label = UNIT_NAME
