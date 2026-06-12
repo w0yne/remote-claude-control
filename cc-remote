@@ -12,7 +12,6 @@ Subcommands:
 import argparse
 import json
 import os
-import plistlib
 import shutil
 import subprocess
 import sys
@@ -22,8 +21,6 @@ BIN = os.path.join(HOME, "bin")
 ENV_FILE = os.path.join(HOME, ".env")
 SCRIPTS = ["bridge.py", "hook_notify.py", "cc-remote"]
 PACKAGE = "ccremote"  # copied recursively into BIN alongside the entrypoints
-LAUNCHD_LABEL = "com.ccremote.bridge"
-PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
 HOOK_CMD = '"${CC_HOOK_PYTHON:-python3}" "$HOME/.cc_remote/bin/hook_notify.py"'
 # Placeholder values shipped in .env.example — used to detect an unedited .env.
 PLACEHOLDER_MARKERS = ("cli_xxxx", "your_app_secret_here")
@@ -76,33 +73,6 @@ def _creds_look_real():
     return not any(m in app_id or m in secret for m in PLACEHOLDER_MARKERS)
 
 
-def _launchd_info():
-    """Return (loaded, pid, last_exit) for the launchd job, scoped to our label
-    (NOT a broad pgrep). pid is None if the job has no running process."""
-    out = subprocess.run(["launchctl", "list", LAUNCHD_LABEL],
-                         capture_output=True, text=True)
-    if out.returncode != 0:
-        return (False, None, None)
-    pid, last_exit = None, None
-    for line in out.stdout.splitlines():
-        s = line.strip().rstrip(";").replace('"', "")
-        if s.startswith("PID ="):
-            v = s.split("=", 1)[1].strip()
-            pid = v if v != "0" else None
-        elif s.startswith("LastExitStatus ="):
-            last_exit = s.split("=", 1)[1].strip()
-    return (True, pid, last_exit)
-
-
-def _stray_bridges():
-    """PIDs of bridge.py processes NOT managed by our launchd job — catches a
-    manually-started (nohup) bridge that would fight the launchd one."""
-    loaded, ld_pid, _ = _launchd_info()
-    out = subprocess.run(["pgrep", "-f", "bridge.py"], capture_output=True, text=True)
-    pids = [p for p in out.stdout.split() if p]
-    return [p for p in pids if p != ld_pid]
-
-
 def _tmux_session():
     return _env().get("TMUX_SESSION") or "cc"
 
@@ -116,6 +86,16 @@ def _registry():
         sys.path.insert(0, here)
     from ccremote import registry
     return registry
+
+
+def _backend():
+    """The platform service backend (launchd on macOS, systemd on Linux).
+    Imported lazily from beside this script, like _registry()."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from ccremote import platform
+    return platform.detect()
 
 
 def _session_alive(session):
@@ -353,46 +333,20 @@ def cmd_setup(args):
     return 0
 
 
-def _write_plist(pybin):
-    os.makedirs(os.path.dirname(PLIST_PATH), exist_ok=True)
-    bridge_py = os.path.join(BIN, "bridge.py")
-    log_out = os.path.join(HOME, "bridge.log")
-    plist = {
-        "Label": LAUNCHD_LABEL,
-        "ProgramArguments": [pybin, bridge_py],
-        "RunAtLoad": True,
-        # Only relaunch on a CRASH, not on a clean exit, and throttle so a
-        # config error can't spin in a tight loop.
-        "KeepAlive": {"SuccessfulExit": False},
-        "ThrottleInterval": 10,
-        "WorkingDirectory": HOME,
-        "StandardOutPath": log_out,
-        "StandardErrorPath": log_out,
-        # PATH for tmux/freeze/cwebp; UTF-8 locale so CJK text/paths don't
-        # crash the bridge under launchd (which provides no locale).
-        "EnvironmentVariables": {
-            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-            "LANG": "en_US.UTF-8",
-            "LC_ALL": "en_US.UTF-8",
-        },
-    }
-    with open(PLIST_PATH, "wb") as f:
-        plistlib.dump(plist, f)
-    return bridge_py, log_out
-
-
 def cmd_bridge(args):
+    backend = _backend()
     if args.action == "status":
-        loaded, pid, last_exit = _launchd_info()
-        print(f"launchd job {LAUNCHD_LABEL}: {'loaded' if loaded else 'not loaded'}")
-        print(f"bridge process: {'running (PID ' + pid + ')' if pid else 'not running'}")
-        if loaded and not pid and last_exit and last_exit != "0":
-            print(f"⚠️  last exit status {last_exit} — bridge crashed; check the log")
-        stray = _stray_bridges()
+        st = backend.state()
+        print(f"service {backend.service_label}: {'loaded' if st.loaded else 'not loaded'}")
+        print(f"bridge process: {'running (PID ' + str(st.pid) + ')' if st.running else 'not running'}")
+        if st.loaded and not st.running and st.last_exit not in (None, 0):
+            print(f"⚠️  last exit status {st.last_exit} — bridge crashed; check the log")
+        if st.note:
+            print(f"ℹ️  {st.note}")
+        stray = backend.stray_processes()
         if stray:
-            print(f"⚠️  stray (non-launchd) bridge process(es): {', '.join(stray)}")
-            print("    kill them to avoid two bridges fighting one Feishu app:"
-                  f"  kill {' '.join(stray)}")
+            print(f"⚠️  stray (unmanaged) bridge process(es): {', '.join(stray)}")
+            print(f"    kill them to avoid two bridges fighting one Feishu app:  kill {' '.join(stray)}")
         print(f"log: {os.path.join(HOME, 'bridge.log')}")
         return 0
 
@@ -401,52 +355,37 @@ def cmd_bridge(args):
             print("❌ not installed — run: cc-remote install")
             return 1
         pybin = _pybin()
-        # Refuse to bake a broken interpreter into the plist (else launchd would
-        # crash-loop bridge.py on ImportError).
         if not _py_has("lark_oapi", pybin):
             print(f"❌ interpreter {pybin} can't import lark_oapi.")
             print("   Set CC_HOOK_PYTHON (in ~/.cc_remote/.env or the shell) to a")
-            print("   python that has the deps:  pip install lark-oapi python-dotenv")
+            print(f"   python that has the deps:  {backend.python_dep_note()}")
             return 1
         if not _creds_look_real():
             print("❌ ~/.cc_remote/.env has missing or placeholder Feishu creds.")
             print("   Fill FEISHU_APP_ID / FEISHU_APP_SECRET before starting.")
             return 1
-        stray = _stray_bridges()
+        stray = backend.stray_processes()
         if stray:
-            print(f"⚠️  killing stray (non-launchd) bridge(s): {', '.join(stray)}")
+            print(f"⚠️  killing stray (unmanaged) bridge(s): {', '.join(stray)}")
             subprocess.run(["kill"] + stray, capture_output=True)
-        bridge_py, log_out = _write_plist(pybin)
-        # bootout then bootstrap for a clean (re)load; ignore bootout errors.
-        uid = os.getuid()
-        subprocess.run(["launchctl", "bootout", f"gui/{uid}", PLIST_PATH],
-                       capture_output=True)
-        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", PLIST_PATH],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            print(f"⚠️ launchctl bootstrap failed: {r.stderr.strip()}")
-            print(f"   plist written to {PLIST_PATH}; check {log_out}")
+        bridge_py = os.path.join(BIN, "bridge.py")
+        log_out = os.path.join(HOME, "bridge.log")
+        res = backend.start(pybin=pybin, bridge_py=bridge_py, workdir=HOME,
+                            env_file=ENV_FILE, log_path=log_out)
+        if not res.ok:
+            print(f"⚠️ {res.message}")
+            print(f"   check {log_out}")
             return 1
-        print(f"✅ bridge started via launchd ({LAUNCHD_LABEL}, interpreter: {pybin})")
+        print(f"✅ bridge {res.message} (interpreter: {pybin})")
         print(f"   log: {log_out}")
         return 0
 
     if args.action == "stop":
-        uid = os.getuid()
-        # Use the explicit service target; fall back to the plist path form.
-        r = subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            subprocess.run(["launchctl", "bootout", f"gui/{uid}", PLIST_PATH],
-                           capture_output=True)
-        loaded, _, _ = _launchd_info()
-        if not loaded:
-            print("✅ bridge stopped")
-        else:
-            print("⚠️  launchd job still loaded — try again or check launchctl")
-        stray = _stray_bridges()
+        res = backend.stop()
+        print(f"✅ bridge stopped" if res.ok else f"⚠️  {res.message}")
+        stray = backend.stray_processes()
         if stray:
-            print(f"⚠️  stray (non-launchd) bridge(s) still running: {', '.join(stray)}")
+            print(f"⚠️  stray (unmanaged) bridge(s) still running: {', '.join(stray)}")
             print(f"    kill {' '.join(stray)}")
         return 0
 
@@ -473,10 +412,9 @@ def cmd_doctor(args):
           "run: cc-remote install, then fill it")
     check("Feishu creds filled (not placeholder)", _creds_look_real(),
           f"edit {ENV_FILE}: real FEISHU_APP_ID / FEISHU_APP_SECRET")
-    check("freeze installed", bool(shutil.which("freeze")),
-          "brew install charmbracelet/tap/freeze")
-    check("cwebp installed", bool(shutil.which("cwebp")), "brew install webp")
-    check("tmux installed", bool(shutil.which("tmux")), "brew install tmux")
+    backend = _backend()
+    for tool, hint in backend.tool_hints():
+        check(f"{tool} installed", bool(shutil.which(tool)), hint)
     # The thing we actually drive: the launcher from CLAUDE_CMD (default "claude").
     # First token so "claude --resume ..." or an absolute path both resolve.
     claude_bin = (_env().get("CLAUDE_CMD") or "claude").split()[0]
@@ -485,17 +423,19 @@ def cmd_doctor(args):
           "or set CLAUDE_CMD in ~/.cc_remote/.env")
     pybin = _pybin()
     check(f"bridge interpreter has lark_oapi ({pybin})", _py_has("lark_oapi", pybin),
-          "set CC_HOOK_PYTHON to a python with: pip install lark-oapi python-dotenv")
+          backend.python_dep_note())
     check("python dotenv", _py_has("dotenv", pybin), "pip install python-dotenv")
-    loaded, pid, last_exit = _launchd_info()
-    check("bridge running", loaded and bool(pid), "run: cc-remote bridge start")
-    if pid:
-        print(f"   bridge PID: {pid}")
-    elif loaded and last_exit and last_exit != "0":
-        print(f"   ⚠️ launchd job loaded but not running (last exit {last_exit}) — crashed")
-    stray = _stray_bridges()
+    st = backend.state()
+    check("bridge running", st.loaded and st.running, "run: cc-remote bridge start")
+    if st.running:
+        print(f"   bridge PID: {st.pid}")
+    elif st.loaded and st.last_exit not in (None, 0):
+        print(f"   ⚠️ service loaded but not running (last exit {st.last_exit}) — crashed")
+    if st.note:
+        print(f"   ℹ️ {st.note}")
+    stray = backend.stray_processes()
     if stray:
-        print(f"   ⚠️ stray non-launchd bridge(s): {', '.join(stray)} (kill to avoid conflicts)")
+        print(f"   ⚠️ stray (unmanaged) bridge(s): {', '.join(stray)} (kill to avoid conflicts)")
 
     # Current dir configured for the hook? Match OUR hook command, not just any
     # Stop hook. Gated into `ok` via check().
