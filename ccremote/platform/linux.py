@@ -4,8 +4,7 @@ NOT a --user service. Targets Amazon Linux 2023 and Ubuntu on x86_64/arm64.
 
 systemd does no ~ or env expansion: ExecStart needs an absolute interpreter,
 PATH and locale must be set explicitly, and User= is mandatory (a system
-service is root otherwise and would write root-owned files into ~/.cc_remote).
-See docs/tech/2026-06-12T13-16-linux-support-facts-brief.md."""
+service is root otherwise and would write root-owned files into ~/.cc_remote)."""
 import getpass
 import os
 import subprocess
@@ -16,10 +15,10 @@ from .base import ServiceBackend, ServiceState, ServiceResult, _pgrep_bridge
 UNIT_NAME = "ccremote-bridge.service"
 UNIT_PATH = f"/etc/systemd/system/{UNIT_NAME}"
 _LINUX_PATH_DIRS = ["/usr/local/bin", "/usr/bin", "/bin"]
-_CHARM_YUM = ("add charm repo then `sudo dnf install -y freeze` — "
-              "see docs/tech freeze install (repo.charm.sh/yum/)")
-_CHARM_APT = ("add charm repo then `sudo apt install -y freeze` — "
-              "see docs/tech freeze install (repo.charm.sh/apt/)")
+_CHARM_YUM = ("add the charm repo (repo.charm.sh/yum/) then "
+              "`sudo dnf install -y freeze` — see README")
+_CHARM_APT = ("add the charm repo (repo.charm.sh/apt/) then "
+              "`sudo apt install -y freeze` — see README")
 
 
 def _parse_os_release(text):
@@ -41,7 +40,9 @@ def _distro_id():
 
 def _parse_systemctl_show(text):
     """Parse `systemctl show <unit> --property=...` key=value output into a
-    ServiceState. See facts brief 4 for the property semantics."""
+    ServiceState. ActiveState=active + SubState=running + a real MainPID means
+    running; SubState=auto-restart is a transient (crash-restart) window, not
+    down; Result=start-limit-hit means systemd gave up after a crash loop."""
     kv = dict(l.split("=", 1) for l in text.splitlines() if "=" in l)
     active = kv.get("ActiveState", "")
     sub = kv.get("SubState", "")
@@ -67,8 +68,8 @@ def _parse_systemctl_show(text):
 
 def _render_unit(user, pybin, bridge_py, workdir, env_file, log_path, daemon_path):
     """Render the systemd system-service unit. All paths must be absolute —
-    systemd does no ~ or env expansion. Mapping from the macOS launchd plist is
-    documented in the facts brief."""
+    systemd does no ~ or env expansion. Restart=on-failure + RestartSec=10
+    mirror the macOS LaunchAgent's KeepAlive{SuccessfulExit:false} + throttle."""
     return (
         "[Unit]\n"
         "Description=cc-remote Feishu bridge (WebSocket client daemon)\n"
