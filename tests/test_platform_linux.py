@@ -6,7 +6,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ccremote.platform.linux import SystemdBackend, _parse_os_release, _render_unit, _parse_systemctl_show
+from ccremote.platform.linux import SystemdBackend, _parse_os_release, _render_unit, _parse_systemctl_show, UNIT_NAME
 
 
 def test_parse_os_release_amzn():
@@ -98,3 +98,55 @@ def test_parse_systemctl_not_loaded():
     st = _parse_systemctl_show(text)
     assert st.loaded is False
     assert st.running is False
+
+
+def test_start_writes_unit_and_runs_systemctl(monkeypatch, tmp_path):
+    import ccremote.platform.linux as lx
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        class R: returncode = 0; stdout = ""; stderr = ""
+        return R()
+
+    monkeypatch.setattr(lx.subprocess, "run", fake_run)
+    # capture the rendered unit instead of writing to /etc
+    written = {}
+    monkeypatch.setattr(lx, "_stage_unit", lambda content: written.setdefault("c", content) or "/tmp/x.service")
+    monkeypatch.setattr(lx.getpass, "getuser", lambda: "ec2-user")
+
+    b = lx.SystemdBackend()
+    res = b.start(
+        pybin="/opt/venv/bin/python", bridge_py="/home/ec2-user/.cc_remote/bin/bridge.py",
+        workdir="/home/ec2-user/.cc_remote", env_file="/home/ec2-user/.cc_remote/.env",
+        log_path="/home/ec2-user/.cc_remote/bridge.log",
+    )
+    assert res.ok is True
+    assert "User=ec2-user" in written["c"]
+    flat = [" ".join(c) for c in calls]
+    assert any("daemon-reload" in f for f in flat)
+    assert any("enable" in f and "--now" in f and UNIT_NAME in f for f in flat)
+
+
+def test_stop_runs_disable_now(monkeypatch):
+    import ccremote.platform.linux as lx
+    calls = []
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        class R: returncode = 0; stdout = ""; stderr = ""
+        return R()
+    monkeypatch.setattr(lx.subprocess, "run", fake_run)
+    b = lx.SystemdBackend()
+    monkeypatch.setattr(b, "state", lambda: lx.ServiceState(loaded=False, running=False))
+    res = b.stop()
+    assert res.ok is True
+    flat = [" ".join(c) for c in calls]
+    assert any("disable" in f and "--now" in f for f in flat)
+
+
+def test_stray_processes_excludes_managed(monkeypatch):
+    import ccremote.platform.linux as lx
+    monkeypatch.setattr(lx, "_pgrep_bridge", lambda: ["100", "200"])
+    b = lx.SystemdBackend()
+    monkeypatch.setattr(b, "state", lambda: lx.ServiceState(loaded=True, running=True, pid=200))
+    assert b.stray_processes() == ["100"]

@@ -9,6 +9,7 @@ See docs/tech/2026-06-12T13-16-linux-support-facts-brief.md."""
 import getpass
 import os
 import subprocess
+import tempfile
 
 from .base import ServiceBackend, ServiceState, ServiceResult, _pgrep_bridge
 
@@ -90,6 +91,19 @@ def _render_unit(user, pybin, bridge_py, workdir, env_file, log_path, daemon_pat
     )
 
 
+def _stage_unit(content):
+    """Write the unit content to a temp file the user owns; return its path.
+    (Separated so start() is testable without touching /etc.)"""
+    fd, path = tempfile.mkstemp(suffix=".service")
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+    return path
+
+
+def _run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
 class SystemdBackend(ServiceBackend):
     name = "linux"
     service_label = UNIT_NAME
@@ -105,3 +119,39 @@ class SystemdBackend(ServiceBackend):
              "--property=" + ",".join(self._SHOW_PROPS), "--no-pager"],
             capture_output=True, text=True)
         return _parse_systemctl_show(out.stdout)
+
+    def start(self, pybin, bridge_py, workdir, env_file, log_path):
+        user = getpass.getuser()
+        unit = _render_unit(user=user, pybin=pybin, bridge_py=bridge_py,
+                            workdir=workdir, env_file=env_file, log_path=log_path,
+                            daemon_path=self.daemon_path())
+        staged = _stage_unit(unit)
+        steps = [
+            ["sudo", "cp", staged, UNIT_PATH],
+            ["sudo", "systemctl", "daemon-reload"],
+            ["sudo", "systemctl", "enable", "--now", UNIT_NAME],
+        ]
+        try:
+            for cmd in steps:
+                r = _run(cmd)
+                if r.returncode != 0:
+                    hint = ("\n  sudo may need a password or NOPASSWD; run these manually:\n    "
+                            + "\n    ".join(" ".join(s) for s in steps))
+                    return ServiceResult(False, f"{' '.join(cmd)} failed: {r.stderr.strip()}{hint}")
+            return ServiceResult(True, f"started via systemd ({UNIT_NAME})")
+        finally:
+            try:
+                os.unlink(staged)
+            except OSError:
+                pass
+
+    def stop(self):
+        r = _run(["sudo", "systemctl", "disable", "--now", UNIT_NAME])
+        if r.returncode != 0 and self.state().loaded is not False:
+            return ServiceResult(False, f"systemctl disable failed: {r.stderr.strip()}")
+        return ServiceResult(True, "stopped")
+
+    def stray_processes(self):
+        managed = self.state().pid
+        managed_s = str(managed) if managed else None
+        return [p for p in _pgrep_bridge() if p != managed_s]
