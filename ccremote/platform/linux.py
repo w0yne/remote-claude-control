@@ -34,6 +34,32 @@ def _distro_id():
         return ""
 
 
+def _parse_systemctl_show(text):
+    """Parse `systemctl show <unit> --property=...` key=value output into a
+    ServiceState. See facts brief 4 for the property semantics."""
+    kv = dict(l.split("=", 1) for l in text.splitlines() if "=" in l)
+    active = kv.get("ActiveState", "")
+    sub = kv.get("SubState", "")
+    pid_raw = kv.get("MainPID", "0")
+    pid = int(pid_raw) if pid_raw.isdigit() and pid_raw != "0" else None
+    exit_raw = kv.get("ExecMainStatus", "")
+    last_exit = int(exit_raw) if exit_raw.lstrip("-").isdigit() else None
+    note_bits = []
+    if sub == "auto-restart":
+        note_bits.append("auto-restart (transient)")
+    if kv.get("Result") == "start-limit-hit":
+        note_bits.append("start-limit-hit (run: systemctl reset-failed)")
+    if active == "failed":
+        note_bits.append("failed")
+    return ServiceState(
+        loaded=kv.get("LoadState") == "loaded",
+        running=(active == "active" and sub == "running" and pid is not None),
+        pid=pid,
+        last_exit=last_exit,
+        note="; ".join(note_bits),
+    )
+
+
 def _render_unit(user, pybin, bridge_py, workdir, env_file, log_path, daemon_path):
     """Render the systemd system-service unit. All paths must be absolute —
     systemd does no ~ or env expansion. Mapping from the macOS launchd plist is
@@ -67,6 +93,15 @@ def _render_unit(user, pybin, bridge_py, workdir, env_file, log_path, daemon_pat
 class SystemdBackend(ServiceBackend):
     name = "linux"
     service_label = UNIT_NAME
+    _SHOW_PROPS = ["ActiveState", "SubState", "MainPID", "ExecMainStatus",
+                   "Result", "LoadState", "UnitFileState", "NRestarts"]
 
     def extra_path_dirs(self):
         return list(_LINUX_PATH_DIRS)
+
+    def state(self):
+        out = subprocess.run(
+            ["systemctl", "show", UNIT_NAME,
+             "--property=" + ",".join(self._SHOW_PROPS), "--no-pager"],
+            capture_output=True, text=True)
+        return _parse_systemctl_show(out.stdout)

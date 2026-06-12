@@ -6,7 +6,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ccremote.platform.linux import SystemdBackend, _parse_os_release, _render_unit
+from ccremote.platform.linux import SystemdBackend, _parse_os_release, _render_unit, _parse_systemctl_show
 
 
 def test_parse_os_release_amzn():
@@ -60,3 +60,41 @@ def test_render_unit_has_required_fields():
     assert "StandardOutput=append:/home/ec2-user/.cc_remote/bridge.log" in unit
     assert "WantedBy=multi-user.target" in unit
     assert "Wants=network-online.target" in unit
+
+
+def test_parse_systemctl_active_running():
+    text = ("ActiveState=active\nSubState=running\nMainPID=4242\n"
+            "ExecMainStatus=0\nResult=success\nLoadState=loaded\n"
+            "UnitFileState=enabled\nNRestarts=0\n")
+    st = _parse_systemctl_show(text)
+    assert st.loaded is True
+    assert st.running is True
+    assert st.pid == 4242
+    assert st.last_exit == 0
+
+
+def test_parse_systemctl_auto_restart_is_transient_not_down():
+    text = ("ActiveState=activating\nSubState=auto-restart\nMainPID=0\n"
+            "ExecMainStatus=1\nResult=exit-code\nLoadState=loaded\n"
+            "UnitFileState=enabled\nNRestarts=3\n")
+    st = _parse_systemctl_show(text)
+    assert st.loaded is True
+    assert st.running is False
+    assert st.pid is None
+    assert "auto-restart" in st.note
+
+
+def test_parse_systemctl_start_limit_hit():
+    text = ("ActiveState=failed\nSubState=failed\nMainPID=0\n"
+            "ExecMainStatus=1\nResult=start-limit-hit\nLoadState=loaded\n"
+            "UnitFileState=enabled\nNRestarts=5\n")
+    st = _parse_systemctl_show(text)
+    assert st.running is False
+    assert "start-limit-hit" in st.note
+
+
+def test_parse_systemctl_not_loaded():
+    text = "ActiveState=inactive\nSubState=dead\nMainPID=0\nLoadState=not-found\n"
+    st = _parse_systemctl_show(text)
+    assert st.loaded is False
+    assert st.running is False
