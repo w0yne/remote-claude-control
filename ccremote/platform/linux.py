@@ -16,6 +16,10 @@ from .base import ServiceBackend, ServiceState, ServiceResult, _pgrep_bridge
 UNIT_NAME = "ccremote-bridge.service"
 UNIT_PATH = f"/etc/systemd/system/{UNIT_NAME}"
 _LINUX_PATH_DIRS = ["/usr/local/bin", "/usr/bin", "/bin"]
+_CHARM_YUM = ("add charm repo then `sudo dnf install -y freeze` — "
+              "see docs/tech freeze install (repo.charm.sh/yum/)")
+_CHARM_APT = ("add charm repo then `sudo apt install -y freeze` — "
+              "see docs/tech freeze install (repo.charm.sh/apt/)")
 
 
 def _parse_os_release(text):
@@ -155,3 +159,29 @@ class SystemdBackend(ServiceBackend):
         managed = self.state().pid
         managed_s = str(managed) if managed else None
         return [p for p in _pgrep_bridge() if p != managed_s]
+
+    def tool_hints(self):
+        distro = _distro_id()
+        if distro in ("amzn", "rhel", "fedora", "centos"):
+            return [
+                ("freeze", _CHARM_YUM),
+                ("cwebp", "sudo dnf install -y libwebp-tools"),
+                ("tmux", "sudo dnf install -y tmux"),
+            ]
+        if distro in ("ubuntu", "debian"):
+            return [
+                ("freeze", _CHARM_APT),
+                ("cwebp", "sudo apt install -y webp"),
+                ("tmux", "sudo apt install -y tmux"),
+            ]
+        return [
+            ("freeze", "install via your package manager or github.com/charmbracelet/freeze"),
+            ("cwebp", "install your distro's webp / libwebp-tools package (provides cwebp)"),
+            ("tmux", "install tmux via your package manager"),
+        ]
+
+    def python_dep_note(self):
+        return ("create a venv and point CC_HOOK_PYTHON at it (PEP 668 blocks "
+                "system pip):  python3 -m venv ~/.cc_remote/venv && "
+                "~/.cc_remote/venv/bin/pip install lark-oapi python-dotenv  "
+                "then set CC_HOOK_PYTHON=~/.cc_remote/venv/bin/python in ~/.cc_remote/.env")

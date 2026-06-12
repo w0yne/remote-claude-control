@@ -150,3 +150,37 @@ def test_stray_processes_excludes_managed(monkeypatch):
     b = lx.SystemdBackend()
     monkeypatch.setattr(b, "state", lambda: lx.ServiceState(loaded=True, running=True, pid=200))
     assert b.stray_processes() == ["100"]
+
+
+def test_tool_hints_amzn(monkeypatch):
+    import ccremote.platform.linux as lx
+    monkeypatch.setattr(lx, "_distro_id", lambda: "amzn")
+    hints = dict(lx.SystemdBackend().tool_hints())
+    assert hints["cwebp"] == "sudo dnf install -y libwebp-tools"   # verified on live AL2023
+    assert hints["tmux"] == "sudo dnf install -y tmux"
+    assert "repo.charm.sh" in hints["freeze"]
+
+
+def test_tool_hints_ubuntu(monkeypatch):
+    import ccremote.platform.linux as lx
+    monkeypatch.setattr(lx, "_distro_id", lambda: "ubuntu")
+    hints = dict(lx.SystemdBackend().tool_hints())
+    assert hints["cwebp"] == "sudo apt install -y webp"            # NOT libwebp-tools on Ubuntu
+    assert hints["tmux"] == "sudo apt install -y tmux"
+    assert "repo.charm.sh" in hints["freeze"]
+
+
+def test_tool_hints_unknown_distro_generic(monkeypatch):
+    import ccremote.platform.linux as lx
+    monkeypatch.setattr(lx, "_distro_id", lambda: "")
+    hints = dict(lx.SystemdBackend().tool_hints())
+    # Generic, non-failing guidance.
+    assert "tmux" in hints["tmux"].lower()
+    assert "github.com/charmbracelet/freeze" in hints["freeze"]
+
+
+def test_python_dep_note_mentions_venv():
+    import ccremote.platform.linux as lx
+    note = lx.SystemdBackend().python_dep_note()
+    assert "venv" in note
+    assert "CC_HOOK_PYTHON" in note
