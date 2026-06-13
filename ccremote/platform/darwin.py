@@ -5,13 +5,14 @@ import os
 import plistlib
 import subprocess
 
-from .base import ServiceBackend, ServiceState, ServiceResult, _pgrep_bridge
+from .base import ServiceBackend, ServiceState, ServiceResult
 
 LAUNCHD_LABEL = "com.ccremote.bridge"
 PLIST_PATH = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
-# Homebrew dirs for tmux/freeze/cwebp; system dirs appended for the daemon env.
+# Homebrew dirs for tmux/freeze/cwebp; system dirs appended for the daemon env
+# (launchd provides no PATH). One source list → no two constants to keep in sync.
 _HOMEBREW_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
-_DAEMON_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+_DAEMON_PATH = ":".join(_HOMEBREW_DIRS + ["/usr/bin", "/bin"])
 
 
 def _parse_launchctl_list(text, returncode):
@@ -102,8 +103,3 @@ class LaunchdBackend(ServiceBackend):
         if not self.state().loaded:
             return ServiceResult(True, "stopped")
         return ServiceResult(False, "launchd job still loaded — try again")
-
-    def stray_processes(self):
-        managed = self.state().pid
-        managed_s = str(managed) if managed else None
-        return [p for p in _pgrep_bridge() if p != managed_s]

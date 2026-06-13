@@ -51,9 +51,25 @@ class ServiceBackend:
     def state(self) -> ServiceState:
         raise NotImplementedError
 
-    def stray_processes(self) -> list:
-        """PIDs (as str) of bridge.py processes NOT managed by this backend."""
-        raise NotImplementedError
+    def stray_processes(self, managed_pid="__fetch__") -> list:
+        """PIDs (as str) of bridge.py processes NOT managed by this backend.
+
+        Identical across launchd/systemd, so it lives here. Pass managed_pid
+        when the caller already has state() in hand, to skip a redundant
+        launchctl/systemctl subprocess (and the TOCTOU window between the two
+        reads — a relaunch in between would otherwise flag the fresh managed
+        process as a stray). Pass managed_pid=None to mean 'nothing is managed'
+        (e.g. right after stop()), so every live bridge.py counts as stray.
+        Omit it entirely (the default) to fetch the managed pid via state()."""
+        if managed_pid == "__fetch__":
+            managed_pid = self.state().pid
+        managed_s = str(managed_pid) if managed_pid else None
+        return [p for p in _pgrep_bridge() if p != managed_s]
+
+    def health_warnings(self) -> list:
+        """Extra OS-specific doctor checks: [(label, ok_bool, hint), ...].
+        Empty by default; the CLI stays platform-agnostic and just loops these."""
+        return []
 
     def tool_hints(self) -> list:
         """[(tool_name, install_hint_str), ...] for freeze/cwebp/tmux."""

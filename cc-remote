@@ -340,7 +340,7 @@ def cmd_bridge(args):
             print(f"⚠️  last exit status {st.last_exit} — bridge crashed; check the log")
         if st.note:
             print(f"ℹ️  {st.note}")
-        stray = backend.stray_processes()
+        stray = backend.stray_processes(managed_pid=st.pid)
         if stray:
             print(f"⚠️  stray (unmanaged) bridge process(es): {', '.join(stray)}")
             print(f"    kill them to avoid two bridges fighting one Feishu app:  kill {' '.join(stray)}")
@@ -380,7 +380,9 @@ def cmd_bridge(args):
     if args.action == "stop":
         res = backend.stop()
         print(f"✅ bridge stopped" if res.ok else f"⚠️  {res.message}")
-        stray = backend.stray_processes()
+        # Service is down now, so any surviving bridge.py is by definition a
+        # stray; managed_pid=None both says that and skips a redundant state().
+        stray = backend.stray_processes(managed_pid=None)
         if stray:
             print(f"⚠️  stray (unmanaged) bridge(s) still running: {', '.join(stray)}")
             print(f"    kill {' '.join(stray)}")
@@ -419,9 +421,11 @@ def cmd_doctor(args):
           "install & log in to Claude Code first (npm i -g @anthropic-ai/claude-code), "
           "or set CLAUDE_CMD in ~/.cc_remote/.env")
     pybin = _pybin()
-    check(f"bridge interpreter has lark_oapi ({pybin})", _py_has("lark_oapi", pybin),
+    # lark_oapi and python-dotenv are the two bridge deps; both come from the
+    # same install step, so one platform-aware hint covers either being absent.
+    check(f"bridge interpreter has lark_oapi + dotenv ({pybin})",
+          _py_has("lark_oapi", pybin) and _py_has("dotenv", pybin),
           backend.python_dep_note())
-    check("python dotenv", _py_has("dotenv", pybin), "pip install python-dotenv")
     st = backend.state()
     check("bridge running", st.loaded and st.running, "run: cc-remote bridge start")
     if st.running:
@@ -430,17 +434,12 @@ def cmd_doctor(args):
         print(f"   ⚠️ service loaded but not running (last exit {st.last_exit}) — crashed")
     if st.note:
         print(f"   ℹ️ {st.note}")
-    stray = backend.stray_processes()
+    stray = backend.stray_processes(managed_pid=st.pid)
     if stray:
         print(f"   ⚠️ stray (unmanaged) bridge(s): {', '.join(stray)} (kill to avoid conflicts)")
-    # Linux daemon sets LANG/LC_ALL=en_US.UTF-8; warn if that locale is absent
-    # (an inert locale → CJK text/path crashes under systemd). No-op on macOS.
-    if backend.name == "linux":
-        loc = subprocess.run(["locale", "-a"], capture_output=True, text=True)
-        has_utf8 = any("en_us.utf8" in l.lower() or "c.utf-8" in l.lower()
-                       for l in loc.stdout.splitlines())
-        check("en_US.UTF-8 locale present", has_utf8,
-              "sudo locale-gen en_US.UTF-8  (Ubuntu) — prevents CJK crashes under systemd")
+    # OS-specific doctor checks (e.g. Linux locale). CLI stays platform-agnostic.
+    for label, good, hint in backend.health_warnings():
+        check(label, good, hint)
 
     # Current dir configured for the hook? Match OUR hook command, not just any
     # Stop hook. Gated into `ok` via check().

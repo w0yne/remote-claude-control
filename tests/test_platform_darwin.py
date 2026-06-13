@@ -36,6 +36,11 @@ def test_service_label_unchanged():
     assert LaunchdBackend().service_label == "com.ccremote.bridge"
 
 
+def test_health_warnings_empty_on_macos():
+    # macOS has no extra doctor checks; the CLI loops an empty list → no-op.
+    assert LaunchdBackend().health_warnings() == []
+
+
 def test_parse_launchctl_running():
     # Real `launchctl list com.ccremote.bridge` shape (abbreviated).
     text = '''{
@@ -94,8 +99,11 @@ def test_render_plist_fields():
 
 
 def test_stray_processes_excludes_managed(monkeypatch):
+    # stray_processes now lives in base.ServiceBackend (shared by both backends);
+    # _pgrep_bridge is patched there. Excludes the managed pid via state().
+    import ccremote.platform.base as base
     import ccremote.platform.darwin as dw
-    monkeypatch.setattr(dw, "_pgrep_bridge", lambda: ["100", "200"])
+    monkeypatch.setattr(base, "_pgrep_bridge", lambda: ["100", "200"])
     b = dw.LaunchdBackend()
     monkeypatch.setattr(b, "state", lambda: dw.ServiceState(loaded=True, running=True, pid=100))
     assert b.stray_processes() == ["200"]

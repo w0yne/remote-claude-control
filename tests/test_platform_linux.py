@@ -41,7 +41,6 @@ def test_render_unit_has_required_fields():
         user="ec2-user", pybin="/home/ec2-user/.cc_remote/venv/bin/python",
         bridge_py="/home/ec2-user/.cc_remote/bin/bridge.py",
         workdir="/home/ec2-user/.cc_remote",
-        env_file="/home/ec2-user/.cc_remote/.env",
         log_path="/home/ec2-user/.cc_remote/bridge.log",
         daemon_path="/usr/local/bin:/usr/bin:/bin",
     )
@@ -56,7 +55,10 @@ def test_render_unit_has_required_fields():
     assert "Environment=PATH=/usr/local/bin:/usr/bin:/bin" in unit
     assert "Environment=LANG=en_US.UTF-8" in unit
     assert "Environment=LC_ALL=en_US.UTF-8" in unit
-    assert "EnvironmentFile=-/home/ec2-user/.cc_remote/.env" in unit
+    # No EnvironmentFile: the bridge loads .env itself (config.load_env), same as
+    # macOS launchd. Feeding .env through systemd too would let a user PATH=/LANG=
+    # override the explicit UTF-8 locale, and systemd's parser != python-dotenv.
+    assert "EnvironmentFile" not in unit
     assert "StandardOutput=append:/home/ec2-user/.cc_remote/bridge.log" in unit
     assert "WantedBy=multi-user.target" in unit
     assert "Wants=network-online.target" in unit
@@ -144,12 +146,83 @@ def test_stop_runs_disable_now(monkeypatch):
     assert any("disable" in f and "--now" in f for f in flat)
 
 
-def test_stray_processes_excludes_managed(monkeypatch):
+def test_stop_ok_when_process_down_despite_nonzero_disable(monkeypatch):
+    # disable --now can return nonzero for benign reasons (already-disabled,
+    # warnings) while the process is actually gone. Success is decided on
+    # state().running, not the return code — so we don't cry failure falsely.
     import ccremote.platform.linux as lx
-    monkeypatch.setattr(lx, "_pgrep_bridge", lambda: ["100", "200"])
+    def fake_run(cmd, **kw):
+        class R: returncode = 1; stdout = ""; stderr = "Removed /etc/.../unit.service"
+        return R()
+    monkeypatch.setattr(lx.subprocess, "run", fake_run)
+    b = lx.SystemdBackend()
+    monkeypatch.setattr(b, "state", lambda: lx.ServiceState(loaded=True, running=False))  # unit file lingers, process gone
+    res = b.stop()
+    assert res.ok is True
+
+
+def test_stop_reports_failure_when_still_running(monkeypatch):
+    # Genuine failure: the bridge is still up after disable → report it (with
+    # stderr detail) so the user knows the stop didn't take.
+    import ccremote.platform.linux as lx
+    def fake_run(cmd, **kw):
+        class R: returncode = 1; stdout = ""; stderr = "Failed to disable: access denied"
+        return R()
+    monkeypatch.setattr(lx.subprocess, "run", fake_run)
+    b = lx.SystemdBackend()
+    monkeypatch.setattr(b, "state", lambda: lx.ServiceState(loaded=True, running=True, pid=999))
+    res = b.stop()
+    assert res.ok is False
+    assert "access denied" in res.message
+
+
+def test_health_warnings_locale_present(monkeypatch):
+    import ccremote.platform.linux as lx
+    def fake_run(cmd, **kw):
+        class R: returncode = 0; stdout = "C\nen_US.utf8\nPOSIX\n"; stderr = ""
+        return R()
+    monkeypatch.setattr(lx.subprocess, "run", fake_run)
+    warnings = lx.SystemdBackend().health_warnings()
+    assert len(warnings) == 1
+    label, ok, hint = warnings[0]
+    assert "locale" in label.lower()
+    assert ok is True
+
+
+def test_health_warnings_locale_absent(monkeypatch):
+    import ccremote.platform.linux as lx
+    def fake_run(cmd, **kw):
+        class R: returncode = 0; stdout = "C\nPOSIX\n"; stderr = ""
+        return R()
+    monkeypatch.setattr(lx.subprocess, "run", fake_run)
+    _, ok, hint = lx.SystemdBackend().health_warnings()[0]
+    assert ok is False
+    assert "locale-gen" in hint
+
+
+def test_stray_processes_excludes_managed(monkeypatch):
+    # stray_processes now lives in base.ServiceBackend; patch _pgrep_bridge there.
+    import ccremote.platform.base as base
+    import ccremote.platform.linux as lx
+    monkeypatch.setattr(base, "_pgrep_bridge", lambda: ["100", "200"])
     b = lx.SystemdBackend()
     monkeypatch.setattr(b, "state", lambda: lx.ServiceState(loaded=True, running=True, pid=200))
     assert b.stray_processes() == ["100"]
+
+
+def test_stray_processes_managed_pid_arg_skips_state(monkeypatch):
+    # Passing managed_pid avoids calling state() (no redundant systemctl, no
+    # TOCTOU). state() raising proves it isn't invoked.
+    import ccremote.platform.base as base
+    import ccremote.platform.linux as lx
+    monkeypatch.setattr(base, "_pgrep_bridge", lambda: ["100", "200"])
+    b = lx.SystemdBackend()
+    def boom():
+        raise AssertionError("state() should not be called when managed_pid is given")
+    monkeypatch.setattr(b, "state", boom)
+    assert b.stray_processes(managed_pid=200) == ["100"]
+    # managed_pid=None means 'nothing managed' → everything is stray
+    assert b.stray_processes(managed_pid=None) == ["100", "200"]
 
 
 def test_tool_hints_amzn(monkeypatch):

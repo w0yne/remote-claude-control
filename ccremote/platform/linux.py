@@ -10,7 +10,7 @@ import os
 import subprocess
 import tempfile
 
-from .base import ServiceBackend, ServiceState, ServiceResult, _pgrep_bridge
+from .base import ServiceBackend, ServiceState, ServiceResult
 
 UNIT_NAME = "ccremote-bridge.service"
 UNIT_PATH = f"/etc/systemd/system/{UNIT_NAME}"
@@ -66,10 +66,17 @@ def _parse_systemctl_show(text):
     )
 
 
-def _render_unit(user, pybin, bridge_py, workdir, env_file, log_path, daemon_path):
+def _render_unit(user, pybin, bridge_py, workdir, log_path, daemon_path):
     """Render the systemd system-service unit. All paths must be absolute —
     systemd does no ~ or env expansion. Restart=on-failure + RestartSec=10
-    mirror the macOS LaunchAgent's KeepAlive{SuccessfulExit:false} + throttle."""
+    mirror the macOS LaunchAgent's KeepAlive{SuccessfulExit:false} + throttle.
+
+    No EnvironmentFile: the bridge loads ~/.cc_remote/.env itself via
+    config.load_env() (python-dotenv), exactly like macOS launchd (which has
+    no EnvironmentFile equivalent). Feeding .env through systemd's parser too
+    would be redundant and risky — systemd's EnvironmentFile syntax differs
+    from python-dotenv, and any PATH=/LANG= a user puts in .env would override
+    the explicit UTF-8 locale below (which exists to prevent CJK crashes)."""
     return (
         "[Unit]\n"
         "Description=cc-remote Feishu bridge (WebSocket client daemon)\n"
@@ -86,7 +93,6 @@ def _render_unit(user, pybin, bridge_py, workdir, env_file, log_path, daemon_pat
         f"Environment=PATH={daemon_path}\n"
         "Environment=LANG=en_US.UTF-8\n"
         "Environment=LC_ALL=en_US.UTF-8\n"
-        f"EnvironmentFile=-{env_file}\n"
         f"StandardOutput=append:{log_path}\n"
         f"StandardError=append:{log_path}\n"
         "SyslogIdentifier=ccremote-bridge\n"
@@ -126,9 +132,11 @@ class SystemdBackend(ServiceBackend):
         return _parse_systemctl_show(out.stdout)
 
     def start(self, pybin, bridge_py, workdir, env_file, log_path):
+        # env_file is part of the shared start() contract; the bridge loads
+        # .env itself (config.load_env), so the unit doesn't reference it.
         user = getpass.getuser()
         unit = _render_unit(user=user, pybin=pybin, bridge_py=bridge_py,
-                            workdir=workdir, env_file=env_file, log_path=log_path,
+                            workdir=workdir, log_path=log_path,
                             daemon_path=self.daemon_path())
         staged = _stage_unit(unit)
         steps = [
@@ -151,15 +159,26 @@ class SystemdBackend(ServiceBackend):
                 pass
 
     def stop(self):
+        # Success == the process is actually down. We don't gate on returncode
+        # or LoadState: `disable --now` can return nonzero for benign reasons,
+        # and the unit FILE lingers in /etc (LoadState stays 'loaded') until a
+        # daemon-reload even after a clean stop. So check state().running, and
+        # surface stderr only when the bridge is genuinely still up.
         r = _run(["sudo", "systemctl", "disable", "--now", UNIT_NAME])
-        if r.returncode != 0 and self.state().loaded is not False:
-            return ServiceResult(False, f"systemctl disable failed: {r.stderr.strip()}")
+        if self.state().running:
+            detail = f": {r.stderr.strip()}" if r.stderr.strip() else ""
+            return ServiceResult(False, f"systemctl disable failed{detail}")
         return ServiceResult(True, "stopped")
 
-    def stray_processes(self):
-        managed = self.state().pid
-        managed_s = str(managed) if managed else None
-        return [p for p in _pgrep_bridge() if p != managed_s]
+    def health_warnings(self):
+        # The unit pins LANG/LC_ALL=en_US.UTF-8; if that locale isn't generated,
+        # it's inert and CJK text/paths crash under systemd. Surface it so the
+        # CLI needn't know anything Linux-specific.
+        loc = _run(["locale", "-a"])
+        has_utf8 = any("en_us.utf8" in l.lower() or "c.utf-8" in l.lower()
+                       for l in loc.stdout.splitlines())
+        return [("en_US.UTF-8 locale present", has_utf8,
+                 "sudo locale-gen en_US.UTF-8  (Ubuntu) — prevents CJK crashes under systemd")]
 
     def tool_hints(self):
         distro = _distro_id()
