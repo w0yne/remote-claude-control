@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
-from ccremote import config, feishu, signals, tmux, screenshot, registry
+from ccremote import bindings, config, feishu, registry, screenshot, signals, tmux
 
 config.load_env()
 logging.basicConfig(
@@ -101,6 +101,48 @@ def format_projects(base_dir, session_exists):
         dot = "●live" if session_exists(sess) else "○dead"
         lines.append(f"{star} {alias}  [{dot}]  session={sess}  dir={p.get('dir')}")
     return "项目列表（★=当前）：\n" + "\n".join(lines)
+
+
+def do_bind(base_dir, chat_id, alias, rename):
+    """Decide what `/bind <alias>` (sent in a chat) means. Pure except for the
+    injected rename(chat_id, name) -> (ok, err) side effect (the Feishu group
+    rename), so it's testable with a fake rename. Returns (ok, reply):
+      - unknown alias → (False, "<known aliases…>")   [nothing written]
+      - known alias   → (True, "bound + rename note")  [binding written]
+    A rename failure NEVER fails the bind — it's appended as a ⚠️ note, so a
+    missing im:chat scope degrades gracefully to 'name it yourself'."""
+    proj = registry.get(base_dir, alias)
+    if proj is None:
+        known = ", ".join(sorted(registry.load(base_dir).keys())) or "(无)"
+        return (False, f"⚠️ 未知项目 '{alias}'。已注册：{known}")
+    bindings.bind(base_dir, chat_id, alias)
+    ok, err = rename(chat_id, f"🤖 {alias}")
+    note = "" if ok else f"\n⚠️ 自动改名失败（{err}），群名请手动改。"
+    return (True,
+            f"✅ 本群已绑定 '{alias}'（session {proj.get('session')}，"
+            f"目录 {proj.get('dir')}）。{note}")
+
+
+def do_unbind(base_dir, chat_id):
+    """Decide what `/unbind` (sent in a chat) means. Pure. Returns (ok, reply)."""
+    alias = bindings.read_binding(base_dir, chat_id)
+    if alias is None:
+        return (False, "⚠️ 本群未绑定任何项目。")
+    bindings.unbind(base_dir, chat_id)
+    return (True, f"✅ 已解绑 '{alias}'。本群消息改走默认路由（active 指针）。")
+
+
+def do_whoami(base_dir, chat_id):
+    """Report this chat's binding (for `/whoami`). Pure. Returns a reply string."""
+    alias = bindings.read_binding(base_dir, chat_id)
+    if alias is None:
+        return "本群未绑定项目；消息走默认路由（active 指针 / 默认 session）。"
+    proj = registry.get(base_dir, alias)
+    if proj is None:
+        return (f"本群绑定 '{alias}'，但该项目已不在注册表中。"
+                f"请 /unbind，或在电脑上 cc-remote setup --name {alias}。")
+    return (f"本群绑定 '{alias}'（session {proj.get('session')}，"
+            f"目录 {proj.get('dir')}）。")
 
 
 def _send_screenshot(chat_id, session):
