@@ -166,9 +166,9 @@ def update_chat_name(client, chat_id, name):
     module, so a rename hiccup can't fail a /bind. Requires the im:chat scope."""
     if not client or not chat_id:
         return (False, "no client/chat_id")
-    from lark_oapi.api.im.v1 import UpdateChatRequest, UpdateChatRequestBody
-
     try:
+        from lark_oapi.api.im.v1 import UpdateChatRequest, UpdateChatRequestBody
+
         resp = client.im.v1.chat.update(
             UpdateChatRequest.builder()
             .chat_id(chat_id)

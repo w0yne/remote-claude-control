@@ -59,3 +59,19 @@ def test_load_corrupt_returns_empty(tmp_path):
     with open(os.path.join(str(tmp_path), bindings.BINDINGS_FILE), "w") as f:
         f.write("{ not valid json ::::")
     assert bindings.load(str(tmp_path)) == {}
+
+
+def test_load_drops_non_string_entries(tmp_path):
+    """A hand-corrupted bindings.json with non-string values is a valid dict but
+    would make registry.get(base, <list>) raise TypeError. load() must drop such
+    entries so read_binding/resolve_session stay total (never raise)."""
+    with open(os.path.join(str(tmp_path), bindings.BINDINGS_FILE), "w") as f:
+        f.write('{"chat_bad": ["a", "b"], "chat_ok": "web", "chat_num": 4}')
+    assert bindings.load(str(tmp_path)) == {"chat_ok": "web"}
+
+
+def test_read_binding_ignores_corrupt_value(tmp_path):
+    """read_binding on a chat whose stored value is non-string returns None."""
+    with open(os.path.join(str(tmp_path), bindings.BINDINGS_FILE), "w") as f:
+        f.write('{"chat_bad": ["a", "b"]}')
+    assert bindings.read_binding(str(tmp_path), "chat_bad") is None

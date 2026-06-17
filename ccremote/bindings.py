@@ -24,12 +24,18 @@ def _bindings_path(base_dir):
 
 
 def load(base_dir):
-    """The full binding map {chat_id: alias}. Returns {} if missing or corrupt
-    (a garbage file must never break routing)."""
+    """The full binding map {chat_id: alias}. Returns {} if missing or corrupt.
+    Keeps only string→string entries: a hand-corrupted file whose value is a
+    list/number is a valid dict but would make registry.get(base, <list>) raise
+    TypeError downstream — dropping such entries keeps read_binding/
+    resolve_session total so a garbage file never breaks routing."""
     try:
         with open(_bindings_path(base_dir), encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items()
+                if isinstance(k, str) and isinstance(v, str)}
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
 

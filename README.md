@@ -305,7 +305,7 @@ cc-remote projects rm projB                   # 注销
    - `im:message:send_as_bot`（以机器人身份回复/发图——回执、截图、`/read` 必需）
    - `im:resource`（下载消息中的图片——接收图片功能必需）
 7. **发布版本**（权限/事件改完必须发版才生效）；企业租户还需确认应用「可用范围」包含你自己
-8. 在飞书里**单独私聊**机器人（代码只处理 p2p 单聊，不响应群里 @）
+8. 在飞书里**单独私聊**机器人即可开始用（单项目默认就是私聊控制；多项目并行见〈群路由〉，需把 bot 拉进群）
 
 ### 拿到你自己的 open_id（填 `ALLOWED_USERS`）
 
@@ -321,6 +321,7 @@ cc-remote projects rm projB                   # 注销
 4. 把它填回 `.env` 的 `ALLOWED_USERS`，`cc-remote bridge stop && cc-remote bridge start` 重启生效。
 
 > 留空期间 = 任何人都能遥控,所以**拿到后尽快填上**。
+> ⚠️ `ALLOWED_USERS` 留空期间**不要把 bot 拉进任何群**——群里任何成员的消息都会被打进 Claude。先填好 `ALLOWED_USERS` 再用〈群路由〉。
 
 > 没收到回复? 先看运行机器的日志:出现 `Sent to tmux` 即代表指令已送达,只是缺 `send_as_bot` 权限发不出回执。
 

@@ -36,7 +36,9 @@ log = logging.getLogger("bridge")
 
 # Module state.
 _client = None
-pending_images = []  # image paths awaiting the next text message
+# Image paths awaiting the next text message, keyed by chat_id so an image sent
+# in one chat is never forwarded with another chat's text (group isolation).
+pending_images = {}
 
 # At-least-once WS redelivery dedup (see already_handled).
 _seen_messages = OrderedDict()
@@ -149,14 +151,18 @@ def do_whoami(base_dir, chat_id):
             f"目录 {proj.get('dir')}）。")
 
 
-_MENTION_RE = re.compile(r"@_(?:user_\d+|all)\s*")
+# Only LEADING mention tokens — Feishu injects @-placeholders at the very start
+# of the text when the bot is @'d. Anchoring to ^ means a placeholder-looking
+# substring later in the message (an email, a path, code) is left untouched.
+_MENTION_RE = re.compile(r"^(?:@_(?:user_\d+|all)\s*)+")
 
 
 def strip_mentions(text):
-    """Remove Feishu @-mention placeholder tokens (@_user_1 … / @_all) that the
-    platform injects into a group message's text when the bot is @'d, so a
-    command typed as '@bot /bind web' still parses as '/bind web'. A DM, or a
-    group message with no mention, is returned unchanged (modulo trim)."""
+    """Strip leading Feishu @-mention placeholder tokens (@_user_1 … / @_all)
+    that the platform prepends to a group message's text when the bot is @'d, so
+    a command typed as '@bot /bind web' still parses as '/bind web'. Only leading
+    tokens are removed — a literal '@_user_1' mid-text (in an email, path, or
+    code) is preserved. Plain text is returned unchanged (modulo trim)."""
     return _MENTION_RE.sub("", text).strip()
 
 
@@ -204,9 +210,10 @@ def _handle_image(msg, chat_id):
     if not path:
         feishu.send_text(_client, chat_id, "⚠️ 图片下载失败")
         return
-    pending_images.append(path)
+    queue = pending_images.setdefault(chat_id, [])
+    queue.append(path)
     feishu.send_text(_client, chat_id,
-                     f"📷 图片已接收 (共 {len(pending_images)} 张待处理),发文字时一起带给 Claude")
+                     f"📷 图片已接收 (共 {len(queue)} 张待处理),发文字时一起带给 Claude")
 
 
 def handle_message(event: P2ImMessageReceiveV1) -> None:
@@ -220,6 +227,7 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
 
     chat_id = msg.chat_id
     message_id = msg.message_id
+    is_dm = msg.chat_type == "p2p"
 
     # Drop Feishu redeliveries (at-least-once WS) before any side effect.
     if already_handled(message_id):
@@ -236,7 +244,11 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
         text = json.loads(msg.content).get("text", "").strip()
     except (json.JSONDecodeError, AttributeError):
         return
-    text = strip_mentions(text)  # so '@bot /bind web' in a group parses
+    # DMs never carry @-mention placeholders, so leave DM text byte-for-byte as
+    # before (the legacy single-DM path). Only group text gets mention-stripped,
+    # so '@bot /bind web' in a group parses as '/bind web'.
+    if not is_dm:
+        text = strip_mentions(text)
     if not text or text.startswith("#"):
         return
 
@@ -257,23 +269,29 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
                          format_projects(config.CC_REMOTE_DIR, tmux.session_exists))
         return
 
-    if text.startswith("/bind"):
-        parts = text.split(maxsplit=1)
+    # Group-binding commands. Exact first-token match (not startswith) so a
+    # message like '/binding-web' or '/bind these functions' isn't hijacked, and
+    # gated to non-DM chats so a DM's /switch + active pointer stay untouched
+    # (binding a DM would silently pin it). parts[0] is the command word.
+    parts = text.split()
+    cmd = parts[0] if parts else ""
+
+    if cmd == "/bind" and not is_dm:
         if len(parts) < 2:
             feishu.send_text(_client, chat_id,
                              "用法：/bind <项目别名>。在该项目对应的群里发送。")
             return
         rename = lambda cid, name: feishu.update_chat_name(_client, cid, name)
-        _ok, reply = do_bind(config.CC_REMOTE_DIR, chat_id, parts[1].strip(), rename)
+        _ok, reply = do_bind(config.CC_REMOTE_DIR, chat_id, parts[1], rename)
         feishu.send_text(_client, chat_id, reply)
         return
 
-    if text == "/unbind":
+    if cmd == "/unbind" and not is_dm:
         _ok, reply = do_unbind(config.CC_REMOTE_DIR, chat_id)
         feishu.send_text(_client, chat_id, reply)
         return
 
-    if text == "/whoami":
+    if cmd == "/whoami" and not is_dm:
         feishu.send_text(_client, chat_id, do_whoami(config.CC_REMOTE_DIR, chat_id))
         return
 
@@ -319,8 +337,9 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
         feishu.send_text(_client, chat_id, f"⚠️ tmux session '{sess}' not found. Start it first.")
         return
 
-    if pending_images:
-        payload = "\n".join(f"[图片] {p}" for p in pending_images) + "\n" + text
+    queued = pending_images.get(chat_id, [])
+    if queued:
+        payload = "\n".join(f"[图片] {p}" for p in queued) + "\n" + text
     else:
         payload = text
 
@@ -330,7 +349,7 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
     sig = signals.write_signal(sig_dir, message_id, chat_id, reaction_id)
     if tmux.send_text(sess, payload):
         log.info(f"Sent to tmux[{sess}]: {text[:80]}{'...' if len(text) > 80 else ''}")
-        pending_images.clear()
+        pending_images.pop(chat_id, None)
     else:
         if sig:
             try:

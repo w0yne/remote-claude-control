@@ -52,7 +52,23 @@ def test_resolve_session_dangling_binding_falls_back(tmp_path):
     assert bridge.resolve_session(base, "chat_web", default="def") == "cc"
 
 
+def test_resolve_session_corrupt_binding_value_falls_back(tmp_path):
+    """A bindings.json with a non-string value must NOT crash resolve_session
+    (its docstring promises 'never raises'); it falls back to the active pointer
+    — the §3 'corrupt bindings -> safe fallback to old logic' invariant."""
+    import os as _os
+    base = str(tmp_path)
+    registry.write_active(base, "cc")
+    with open(_os.path.join(base, bindings.BINDINGS_FILE), "w") as f:
+        f.write('{"chat_web": ["not", "a", "string"]}')
+    assert bridge.resolve_session(base, "chat_web", default="def") == "cc"
+
+
 # ---- strip_mentions ----
+# A Feishu group injects @-mention placeholders only as LEADING tokens of the
+# text (when the bot is @'d). strip_mentions must remove those but NEVER touch a
+# placeholder-looking substring that appears mid-text (a path, an email, code) —
+# else it silently corrupts legitimate content.
 
 def test_strip_mentions_removes_leading_user_token():
     assert bridge.strip_mentions("@_user_1 /bind web") == "/bind web"
@@ -66,5 +82,20 @@ def test_strip_mentions_plain_text_unchanged():
     assert bridge.strip_mentions("hello world") == "hello world"
 
 
-def test_strip_mentions_multiple_tokens():
+def test_strip_mentions_multiple_leading_tokens():
     assert bridge.strip_mentions("@_user_1 @_user_2 deploy now") == "deploy now"
+
+
+def test_strip_mentions_does_not_eat_midtext_email():
+    """A literal '@_user_1' inside an email/path must survive — only LEADING
+    mention tokens are stripped."""
+    assert bridge.strip_mentions("email foo@_user_1.com") == "email foo@_user_1.com"
+
+
+def test_strip_mentions_does_not_eat_midtext_path():
+    assert bridge.strip_mentions("see path/to/@_user_99/file") == "see path/to/@_user_99/file"
+
+
+def test_strip_mentions_leading_then_midtext_kept():
+    """Strip the leading mention, keep a later in-word occurrence verbatim."""
+    assert bridge.strip_mentions("@_user_1 grep @_all in logs") == "grep @_all in logs"
