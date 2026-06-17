@@ -14,6 +14,7 @@ ccremote package; this file is the WS loop, dedup, and command routing.
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections import OrderedDict
@@ -145,6 +146,31 @@ def do_whoami(base_dir, chat_id):
             f"目录 {proj.get('dir')}）。")
 
 
+_MENTION_RE = re.compile(r"@_(?:user_\d+|all)\s*")
+
+
+def strip_mentions(text):
+    """Remove Feishu @-mention placeholder tokens (@_user_1 … / @_all) that the
+    platform injects into a group message's text when the bot is @'d, so a
+    command typed as '@bot /bind web' still parses as '/bind web'. A DM, or a
+    group message with no mention, is returned unchanged (modulo trim)."""
+    return _MENTION_RE.sub("", text).strip()
+
+
+def resolve_session(base_dir, chat_id, default):
+    """The tmux session a message in `chat_id` routes to. A chat bound to a
+    project → that project's session; an unbound chat (a DM, or an unbound
+    group) → the active pointer or `default` (the legacy single-DM path,
+    untouched). A binding pointing at a since-removed project also falls back.
+    Pure; never raises — routing must not depend on bindings/registry integrity."""
+    alias = bindings.read_binding(base_dir, chat_id)
+    if alias:
+        proj = registry.get(base_dir, alias)
+        if proj and proj.get("session"):
+            return proj["session"]
+    return registry.resolve_target(base_dir, default)
+
+
 def _send_screenshot(chat_id, session):
     """Render `session`'s pane and send it (for /read). True on confirmed send.
     Screenshots go to that session's own per-session dir."""
@@ -188,8 +214,6 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
     if config.ALLOWED_USERS and sender_id not in config.ALLOWED_USERS:
         log.warning(f"Unauthorized user: {sender_id} (not in ALLOWED_USERS)")
         return
-    if msg.chat_type != "p2p":
-        return
 
     chat_id = msg.chat_id
     message_id = msg.message_id
@@ -209,6 +233,7 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
         text = json.loads(msg.content).get("text", "").strip()
     except (json.JSONDecodeError, AttributeError):
         return
+    text = strip_mentions(text)  # so '@bot /bind web' in a group parses
     if not text or text.startswith("#"):
         return
 
@@ -229,9 +254,30 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
                          format_projects(config.CC_REMOTE_DIR, tmux.session_exists))
         return
 
-    # Everything else routes to the currently-active session (active pointer,
-    # falling back to TMUX_SESSION). Signals/screenshots are per-session.
-    sess = registry.resolve_target(config.CC_REMOTE_DIR, config.TMUX_SESSION)
+    if text.startswith("/bind"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            feishu.send_text(_client, chat_id,
+                             "用法：/bind <项目别名>。在该项目对应的群里发送。")
+            return
+        rename = lambda cid, name: feishu.update_chat_name(_client, cid, name)
+        _ok, reply = do_bind(config.CC_REMOTE_DIR, chat_id, parts[1].strip(), rename)
+        feishu.send_text(_client, chat_id, reply)
+        return
+
+    if text == "/unbind":
+        _ok, reply = do_unbind(config.CC_REMOTE_DIR, chat_id)
+        feishu.send_text(_client, chat_id, reply)
+        return
+
+    if text == "/whoami":
+        feishu.send_text(_client, chat_id, do_whoami(config.CC_REMOTE_DIR, chat_id))
+        return
+
+    # Everything else routes to the chat's bound project, or — for a DM / unbound
+    # chat — the currently-active session (active pointer, falling back to
+    # TMUX_SESSION). Signals/screenshots are per-session.
+    sess = resolve_session(config.CC_REMOTE_DIR, chat_id, config.TMUX_SESSION)
     sig_dir = config.signal_dir(sess)
 
     if text == "/status":
