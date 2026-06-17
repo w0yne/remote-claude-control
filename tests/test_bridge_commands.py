@@ -149,3 +149,19 @@ def test_whoami_dangling_binding_points_to_recovery(tmp_path):
     out = bridge.do_whoami(base, "chat_web")
     assert "web" in out
     assert "unbind" in out.lower() or "setup" in out.lower()
+
+
+def test_format_projects_marks_bound_group(tmp_path):
+    base = str(tmp_path)
+    registry.add(base, "web", session="cc-web", dir="/Users/me/dev/web")
+    bindings.bind(base, "chat_web", "web")
+    out = bridge.format_projects(base, _alive("cc-web"))
+    assert "🔗群" in out  # bound project's line shows the link marker
+
+
+def test_format_projects_unbound_has_no_link_marker(tmp_path):
+    base = str(tmp_path)
+    registry.add(base, "web", session="cc-web", dir="/Users/me/dev/web")
+    out = bridge.format_projects(base, _alive("cc-web"))
+    # The legend header mentions 🔗, but no project LINE carries the 🔗群 marker.
+    assert "🔗群" not in out

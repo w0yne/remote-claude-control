@@ -88,20 +88,23 @@ def do_switch(base_dir, alias, session_exists):
 
 
 def format_projects(base_dir, session_exists):
-    """Render `/projects`: one line per registered project with ★active marker
-    and ●live/○dead status. Pure — liveness injected."""
+    """Render `/projects`: one line per registered project with ★active marker,
+    ●live/○dead status, and 🔗 if some chat is bound to it. Pure — liveness
+    injected; active pointer and bindings read from base_dir."""
     reg = registry.load(base_dir)
     if not reg:
         return "（无已注册项目）发送前请在电脑上 `cc-remote setup --name <别名>`。"
     active = registry.read_active(base_dir)
+    bound = set(bindings.load(base_dir).values())
     lines = []
     for alias in sorted(reg):
         p = reg[alias]
         sess = p.get("session")
         star = "★" if sess == active else "  "
         dot = "●live" if session_exists(sess) else "○dead"
-        lines.append(f"{star} {alias}  [{dot}]  session={sess}  dir={p.get('dir')}")
-    return "项目列表（★=当前）：\n" + "\n".join(lines)
+        link = "🔗群" if alias in bound else "   "
+        lines.append(f"{star} {alias}  [{dot}] {link}  session={sess}  dir={p.get('dir')}")
+    return "项目列表（★=当前，🔗=已绑群）：\n" + "\n".join(lines)
 
 
 def do_bind(base_dir, chat_id, alias, rename):
