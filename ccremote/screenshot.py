@@ -16,12 +16,21 @@ import sys
 import tempfile
 from datetime import datetime
 
-# tmux/freeze/cwebp are typically Homebrew binaries; make sure they're findable
-# even if the caller's PATH is minimal. Prepend (avoid a leading colon) and
-# drop empty segments.
-_extra = ["/opt/homebrew/bin", "/usr/local/bin"]
-_path = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
-os.environ["PATH"] = os.pathsep.join(_extra + _path)
+# tmux/freeze/cwebp live in platform-specific bin dirs (Homebrew on macOS,
+# /usr/bin etc. on Linux). Ask the platform backend so they're findable even
+# under a minimal daemon PATH. Prepend, drop empties, stay idempotent.
+def _platform_path_dirs():
+    try:
+        from ccremote import platform
+        return platform.detect().extra_path_dirs()
+    except Exception:
+        # Never let PATH setup break screenshots; fall back to common dirs.
+        return ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+
+
+_existing = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+_prepend = [d for d in _platform_path_dirs() if d not in _existing]
+os.environ["PATH"] = os.pathsep.join(_prepend + _existing)
 
 
 def log(msg: str) -> None:
