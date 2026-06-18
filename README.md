@@ -2,7 +2,7 @@
 
 飞书 → tmux → Claude Code 远程遥控工具（单机模式）。
 
-> **平台：仅支持 macOS。** 依赖 launchd（常驻 bridge）与 Homebrew（freeze/webp）。Linux 暂不支持。
+> **平台：macOS 与 Linux。** macOS 用 launchd 常驻 bridge、Homebrew 装依赖；Linux（已在 Amazon Linux 2023 与 Ubuntu 24.04、x86_64 与 arm64 实测）用 systemd 常驻 bridge、发行版包管理器装依赖。两套安装见下方——**Mac 用户按〈安装（cc-remote CLI，推荐）〉，Linux 用户按〈Linux / EC2 安装〉**。核心代码同一份，只是常驻方式与依赖装法按平台分流。
 
 ## 用途
 
@@ -14,10 +14,10 @@
 
 照本 README 操作前，先备齐：
 
-1. **macOS**（见上方平台说明）。
+1. **macOS 或 Linux**（Linux 见下方〈Linux / EC2 安装〉，其余步骤通用）。
 2. **Claude Code 本体已安装并登录过**——本工具只是「把飞书消息喂给 tmux 里的 `claude`」，不含 Claude Code 本身。先 `npm i -g @anthropic-ai/claude-code`（或按官方文档装），跑一次 `claude` 完成认证，确认终端里 `claude` 命令可用。**这一步漏了，遥控链路会静默断**（消息打进终端但没有 Claude 在跑，永远等不到截图回传）。
-3. **Python 3.8+**（macOS 自带的 `python3` 一般够）。
-4. **Homebrew**（用于装 freeze / webp / tmux）。
+3. **Python 3.8+**（macOS 自带的 `python3` 一般够；Linux 见下方说明——某些发行版需用 venv，依赖装不进系统 python）。
+4. **包管理器**：macOS 用 **Homebrew**，Linux 用发行版自带的 **dnf**（Amazon Linux / RHEL 系）或 **apt**（Ubuntu / Debian 系）——用于装 freeze / webp / tmux / librsvg + 字体。
 5. **一个飞书账号**，能登录[飞书开放平台](https://open.feishu.cn/)创建自建应用（见下方〈飞书应用配置〉）。
 
 ```
@@ -34,7 +34,9 @@
 `bridge.py`、`hook_notify.py` 是薄入口。`cc-remote install` 会把整个包拷到
 `~/.cc_remote/bin/`，入口脚本从旁边 `import ccremote`。
 
-## 安装（cc-remote CLI，推荐）
+## 安装（cc-remote CLI，推荐）— macOS
+
+> Linux / EC2 用户请直接跳到下方〈Linux / EC2 安装〉。本节是 macOS 流程（launchd + Homebrew）。
 
 把工具装到 `~/.cc_remote/`（自包含的家：脚本、`.env`、数据都在这），之后在**任意项目目录**一条命令开工——不再绑定本 repo 目录。
 
@@ -84,6 +86,131 @@ cc-remote bridge status|stop
 > 点不了那种弹窗。`setup` 是**合并而非覆盖**——已有的 `.claude/settings.json` 配置会保留,重复跑也
 > 不会产生重复 hook。
 
+## Linux / EC2 安装
+
+在 **Amazon Linux 2023** 与 **Ubuntu 24.04**、**x86_64 与 arm64（Graviton）** 上均已实测。与 macOS 的差别只有两处：**依赖用发行版包管理器装**、**常驻 bridge 走 systemd 而非 launchd**。核心代码、飞书配置、`setup`/`/switch` 等用法完全一致——配完依赖后，下方〈飞书应用配置〉及之后的章节通用。
+
+> 典型场景是云上的无头（headless）服务器（如 EC2）：终端截图由 `freeze` 纯软件渲染，**不需要 X11 / 显示器 / GUI**。
+
+### 1. 装依赖（按发行版选一套）
+
+Linux 上有两个 macOS 没有的关键点：
+
+- **`rsvg-convert`（librsvg）是中文渲染的命脉，不是可选项。** `freeze` 若在 PATH 上找到 `rsvg-convert` 就用它（经 fontconfig 读系统字体、逐字形 fallback），否则退回只认拉丁字母的内嵌引擎——届时**终端里的中文、UI 符号会变成豆腐块**。macOS 因为一般装过 librsvg 不暴露这点，headless Linux 必须显式装。
+- **要装字体**：CJK、TUI 符号（`✶ ❯ ⏵`）、emoji 各属不同 Unicode 区段，需不同字体覆盖。彩色 emoji 本渲染链不支持，最佳效果是「单色轮廓」（装单色 emoji 字体即可消除豆腐块）。
+
+**Amazon Linux 2023 / RHEL 系（dnf）：**
+
+```bash
+# tmux + cwebp + Python 工具链
+sudo dnf install -y tmux libwebp-tools python3-pip
+
+# freeze（来自 charm 官方 yum repo；含 aarch64 build）
+sudo tee /etc/yum.repos.d/charm.repo >/dev/null <<'EOF'
+[charm]
+name=Charm
+baseurl=https://repo.charm.sh/yum/
+enabled=1
+gpgcheck=1
+gpgkey=https://repo.charm.sh/yum/gpg.key
+EOF
+sudo dnf install -y freeze
+
+# 渲染依赖：librsvg（中文命脉）+ 字体（CJK / 符号 / emoji）
+sudo dnf install -y librsvg2-tools fontconfig \
+  google-noto-sans-cjk-ttc-fonts \      # 中文（注意 -ttc 后缀）
+  google-noto-sans-symbols2-fonts \     # ⏵ U+23F5 唯一来源
+  dejavu-sans-fonts \                   # ✶ ❯ 等符号兜底
+  google-noto-emoji-fonts               # emoji 单色轮廓（消豆腐块）
+sudo fc-cache -f
+```
+
+**Ubuntu 24.04 / Debian 系（apt）：**
+
+```bash
+# tmux + cwebp + Python venv（包名与 dnf 不同：cwebp 是 webp，不是 libwebp-tools）
+sudo apt-get update && sudo apt-get install -y tmux webp python3-pip python3-venv
+
+# freeze（来自 charm 官方 apt repo；含 arm64 build）
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list
+sudo apt-get update && sudo apt-get install -y freeze
+
+# 渲染依赖：librsvg（-bin，不是 -tools）+ 字体
+sudo apt-get install -y librsvg2-bin fontconfig \
+  fonts-noto-cjk \          # 中文
+  fonts-noto-core \         # 含 Noto Symbols2（⏵）
+  fonts-dejavu \            # ✶ ❯
+  fonts-noto-color-emoji    # emoji
+sudo fc-cache -f
+```
+
+> apt 源那行字面的 `* *` 是 charm flat-repo 布局，照抄、别替换成 dist/component。
+
+### 2. 创建 venv 装 Python 依赖
+
+部分发行版（Ubuntu 24.04 等）开启了 PEP 668「externally-managed」，**裸 `pip install` 进系统 python 会被拒**。统一用 venv，既绕开这道闸、也不污染 OS 自带的 `python3`：
+
+```bash
+python3 -m venv ~/.cc_remote_venv
+~/.cc_remote_venv/bin/pip install lark-oapi python-dotenv
+```
+
+记下这个解释器路径 `~/.cc_remote_venv/bin/python3`——下面安装、起 bridge、配 hook 都要用它。
+
+### 3. 安装 + 配置（**注意：用 venv 的 python 跑 `cc-remote`**）
+
+> **关键**：`cc-remote` 命令本身要读 `.env`，依赖 `python-dotenv`。所以**跑 `cc-remote` 时要用上面 venv 里的 python**，而不是系统 `python3`——否则它读不到 `.env`，会误报「凭证缺失或是占位符」。
+
+```bash
+# 在本 repo 目录里安装（拷代码到 ~/.cc_remote/bin、建目录、生成 .env 模板）
+~/.cc_remote_venv/bin/python3 cc-remote install
+echo 'export PATH="$HOME/.cc_remote/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
+# 填飞书凭证 + Claude 启动命令 + 指定带依赖的解释器
+$EDITOR ~/.cc_remote/.env
+#   FEISHU_APP_ID / FEISHU_APP_SECRET / ALLOWED_USERS / TMUX_SESSION
+#   CLAUDE_CMD=claude --dangerously-skip-permissions   ← 远程遥控必须带 bypass
+#   CC_HOOK_PYTHON=/home/<你>/.cc_remote_venv/bin/python3
+#     ↑ 让 Stop hook 用带 lark_oapi 的解释器（系统 python3 没装依赖会静默失败）
+```
+
+`CC_HOOK_PYTHON` 必须填**绝对路径**、指向上面那个 venv python。它有两个作用：(1) Stop hook 用它截图回传；(2) `cc-remote` 自身也优先用它跑（PATH 里 `cc-remote` 的 shebang 是系统 python，但它会读 `CC_HOOK_PYTHON` 来执行需要依赖的子任务）。最稳的习惯：**所有 `cc-remote ...` 命令都写成 `~/.cc_remote_venv/bin/python3 ~/.cc_remote/bin/cc-remote ...`**，或确保当前 shell 的 `python3` 就是 venv 那个。
+
+### 4. 起 systemd 常驻 bridge
+
+`cc-remote bridge start` 在 Linux 上会**生成 systemd system service** `/etc/systemd/system/ccremote-bridge.service` 并 `enable --now`（开机自启 + 立即启动 + 崩溃自动重拉），等价于 macOS 的 launchd。它**以你的普通用户身份运行**（非 root），日志写到 `~/.cc_remote/bridge.log`：
+
+```bash
+~/.cc_remote_venv/bin/python3 ~/.cc_remote/bin/cc-remote bridge start
+~/.cc_remote_venv/bin/python3 ~/.cc_remote/bin/cc-remote doctor    # 自检依赖/凭证/服务
+~/.cc_remote_venv/bin/python3 ~/.cc_remote/bin/cc-remote bridge status
+
+# 也可直接用 systemctl 观察（读状态不需 sudo）
+systemctl status ccremote-bridge.service
+journalctl -u ccremote-bridge.service -f
+```
+
+> `bridge start/stop` 内部会调 `sudo systemctl`（写 unit、daemon-reload、enable/disable），所以这两条命令会触发一次 sudo 提权；`status` 与 `journalctl` 只读、不需要 sudo。
+
+之后在任意项目目录 `cc-remote setup`（同 macOS）就能开工。`doctor` 在 Linux 上会额外检查 `en_US.UTF-8` locale 是否存在（缺则中文路径/文本可能出错；Ubuntu 可 `sudo locale-gen en_US.UTF-8`）。
+
+### Linux 依赖速查
+
+| 依赖 | Amazon Linux 2023（dnf） | Ubuntu 24.04（apt） | 必需性 |
+|---|---|---|---|
+| tmux | `tmux` | `tmux` | 必需 |
+| freeze | charm yum repo | charm apt repo | 必需（终端→图片）|
+| cwebp | `libwebp-tools` | `webp` | 可选（缺则降级发 PNG）|
+| **rsvg-convert** | `librsvg2-tools` | `librsvg2-bin` | **必需**（中文渲染命脉）|
+| CJK 字体 | `google-noto-sans-cjk-ttc-fonts` | `fonts-noto-cjk` | 含中文时必需 |
+| 符号字体（⏵ 等）| `google-noto-sans-symbols2-fonts` + `dejavu-sans-fonts` | `fonts-noto-core` + `fonts-dejavu` | Claude TUI 必需 |
+| emoji（单色轮廓）| `google-noto-emoji-fonts` | `fonts-noto-color-emoji` | 可选（消豆腐块）|
+| Python 依赖 | venv + `lark-oapi python-dotenv` | 同左（PEP 668 强制 venv）| 必需 |
+
+> **彩色 emoji 说明**：`freeze` 的渲染链不支持彩色 emoji（位图/矢量彩色字形层），最佳效果是单色轮廓。装了单色 emoji 字体后 emoji 显示为黑白轮廓、不再是豆腐块——这是 headless Linux 上的预期最佳状态，不影响中文与 UI 符号（那些已能完整正常渲染）。
+
 ## 飞书端使用
 
 | 命令 | 作用 |
@@ -91,7 +218,10 @@ cc-remote bridge status|stop
 | `/read` | 截取**当前 active 项目**的终端屏幕并以图片发回（解卡时看为什么卡住）|
 | `/status` | 查看当前 active 项目的 session 名、是否在线 |
 | `/switch <别名>` | 切换当前 active 项目（多项目路由，见下节）|
-| `/projects` | 列出已注册项目，★ 标记当前 active |
+| `/projects` | 列出已注册项目，★ 标记当前 active，🔗 标记已绑群 |
+| `/bind <别名>` | （群里发）把当前群绑定到项目，见〈群路由〉|
+| `/unbind` | （群里发）解除当前群绑定 |
+| `/whoami` | （群里发）查看当前群绑的项目 |
 | `/enter` | 在终端按回车（确认弹窗 / 选 Yes / 提交）|
 | `/esc` | 在终端按 ESC（取消弹窗 / 退出模式）|
 | `/up` `/down` | 在终端按上/下方向键（在多选弹窗里移动光标）|
@@ -130,6 +260,38 @@ cc-remote projects rm projB                   # 注销
   - 目标 session 必须已在运行（Phase A：`/switch` 只改路由，不会替你起/恢复 session）。
 - 不带 `--name` 的 `setup` 仍是单项目模式（兼容老行为），消息路由到 `TMUX_SESSION`（默认 `cc`）。
 
+## 群路由（多项目并行）
+
+默认你和 bot 在一个私聊里，用 `/switch <别名>` 在项目间切换（同一时刻聊一个）。
+如果你想**同时**盯多个项目，可以给每个项目建一个飞书群、把 bot 拉进去，让群和项目一一绑定——
+之后在哪个群发消息就直达哪个项目，互不干扰，Claude 的回复/截图也只回到对应群。
+
+### 一次性准备（飞书后台）
+
+1. 给应用**订阅群消息**：事件 `im.message.receive_v1` 对群聊生效（与私聊同一事件）。
+2. 加权限 **`im:chat`**（更新群信息）——用于 `/bind` 时自动把群名改成项目名。
+   未开通也能用，只是不会自动改名（你可手动改群名）。
+
+### 绑定一个群
+
+1. 在电脑上为该项目 setup：`cc-remote setup --name <别名>`（注册到项目表）。
+2. 新建一个飞书群，把 bot 拉进去。
+3. 在群里发 `/bind <别名>`。bot 会把这个群绑到该项目，并尝试把群名改成 `🤖 <别名>`。
+
+之后这个群里发的任何文字都直接进该项目，无需 `/switch`、无需前缀。
+
+### 群内命令
+
+| 命令 | 作用 |
+|---|---|
+| `/bind <别名>` | 把当前群绑定到项目（并自动改群名）|
+| `/unbind` | 解除当前群的绑定（改回默认路由）|
+| `/whoami` | 查看当前群绑的是哪个项目 |
+| `/projects` | 全局项目列表（🔗 标记已绑群的项目）|
+
+> 私聊不受影响：未绑定的会话（私聊，或没 `/bind` 过的群）仍走 `/switch` + active 指针的老逻辑。
+> 群里若需要 @bot 才能触发，命令前缀照常识别（`@bot /bind web` 等价于 `/bind web`）。
+
 ## 飞书应用配置
 
 1. [飞书开放平台](https://open.feishu.cn/) → 创建企业自建应用
@@ -143,7 +305,7 @@ cc-remote projects rm projB                   # 注销
    - `im:message:send_as_bot`（以机器人身份回复/发图——回执、截图、`/read` 必需）
    - `im:resource`（下载消息中的图片——接收图片功能必需）
 7. **发布版本**（权限/事件改完必须发版才生效）；企业租户还需确认应用「可用范围」包含你自己
-8. 在飞书里**单独私聊**机器人（代码只处理 p2p 单聊，不响应群里 @）
+8. 在飞书里**单独私聊**机器人即可开始用（单项目默认就是私聊控制；多项目并行见〈群路由〉，需把 bot 拉进群）
 
 ### 拿到你自己的 open_id（填 `ALLOWED_USERS`）
 
@@ -159,6 +321,7 @@ cc-remote projects rm projB                   # 注销
 4. 把它填回 `.env` 的 `ALLOWED_USERS`，`cc-remote bridge stop && cc-remote bridge start` 重启生效。
 
 > 留空期间 = 任何人都能遥控,所以**拿到后尽快填上**。
+> ⚠️ `ALLOWED_USERS` 留空期间**不要把 bot 拉进任何群**——群里任何成员的消息都会被打进 Claude。先填好 `ALLOWED_USERS` 再用〈群路由〉。
 
 > 没收到回复? 先看运行机器的日志:出现 `Sent to tmux` 即代表指令已送达,只是缺 `send_as_bot` 权限发不出回执。
 
@@ -182,12 +345,14 @@ cc-remote projects rm projB                   # 注销
 > reaction 显示成什么图标取决于飞书对这些 `emoji_type` 的渲染；合法值见飞书「表情文案说明」文档。
 > emoji 旁边会显示机器人名（飞书客户端固定行为，无法去掉）。
 
-**前置依赖**：
+**前置依赖**（macOS）：
 
 ```bash
 brew install charmbracelet/tap/freeze   # 终端→图片渲染（无需 GUI，屏幕锁了也能截）
 brew install webp                        # cwebp：把截图转 WebP，体积小、加载快、不损清晰度
 ```
+
+> Linux 见〈Linux / EC2 安装〉——除 freeze/webp 外还需 **librsvg + Noto 字体**，否则截图里的中文/符号会变豆腐块。
 
 **配置 Stop hook**：`cc-remote setup` 会把它合并进项目级 `.claude/settings.json`，命令为
 `"${CC_HOOK_PYTHON:-python3}" "$HOME/.cc_remote/bin/hook_notify.py"`（指向安装好的入口，
@@ -221,7 +386,7 @@ tmux source ~/.tmux.conf
 ## 网络要求
 
 - bridge 主动连接飞书 WebSocket，无需公网 IP、无需开放任何端口。
-- 远程 Mac 只要能访问外网即可。
+- 远程机器（Mac 或 Linux）只要能访问外网即可。云上 headless 服务器（如 EC2）同样适用——bridge 是出站长连接，无需为它开任何入站端口。
 
 ## 安全
 

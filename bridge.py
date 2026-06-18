@@ -14,6 +14,7 @@ ccremote package; this file is the WS loop, dedup, and command routing.
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections import OrderedDict
@@ -23,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
-from ccremote import config, feishu, signals, tmux, screenshot, registry
+from ccremote import bindings, config, feishu, registry, screenshot, signals, tmux
 
 config.load_env()
 logging.basicConfig(
@@ -35,7 +36,9 @@ log = logging.getLogger("bridge")
 
 # Module state.
 _client = None
-pending_images = []  # image paths awaiting the next text message
+# Image paths awaiting the next text message, keyed by chat_id so an image sent
+# in one chat is never forwarded with another chat's text (group isolation).
+pending_images = {}
 
 # At-least-once WS redelivery dedup (see already_handled).
 _seen_messages = OrderedDict()
@@ -87,20 +90,94 @@ def do_switch(base_dir, alias, session_exists):
 
 
 def format_projects(base_dir, session_exists):
-    """Render `/projects`: one line per registered project with ★active marker
-    and ●live/○dead status. Pure — liveness injected."""
+    """Render `/projects`: one line per registered project with ★active marker,
+    ●live/○dead status, and 🔗 if some chat is bound to it. Pure — liveness
+    injected; active pointer and bindings read from base_dir."""
     reg = registry.load(base_dir)
     if not reg:
         return "（无已注册项目）发送前请在电脑上 `cc-remote setup --name <别名>`。"
     active = registry.read_active(base_dir)
+    bound = set(bindings.load(base_dir).values())
     lines = []
     for alias in sorted(reg):
         p = reg[alias]
         sess = p.get("session")
         star = "★" if sess == active else "  "
         dot = "●live" if session_exists(sess) else "○dead"
-        lines.append(f"{star} {alias}  [{dot}]  session={sess}  dir={p.get('dir')}")
-    return "项目列表（★=当前）：\n" + "\n".join(lines)
+        link = "🔗群" if alias in bound else "   "
+        lines.append(f"{star} {alias}  [{dot}] {link}  session={sess}  dir={p.get('dir')}")
+    return "项目列表（★=当前，🔗=已绑群）：\n" + "\n".join(lines)
+
+
+def do_bind(base_dir, chat_id, alias, rename):
+    """Decide what `/bind <alias>` (sent in a chat) means. Pure except for the
+    injected rename(chat_id, name) -> (ok, err) side effect (the Feishu group
+    rename), so it's testable with a fake rename. Returns (ok, reply):
+      - unknown alias → (False, "<known aliases…>")   [nothing written]
+      - known alias   → (True, "bound + rename note")  [binding written]
+    A rename failure NEVER fails the bind — it's appended as a ⚠️ note, so a
+    missing im:chat scope degrades gracefully to 'name it yourself'."""
+    proj = registry.get(base_dir, alias)
+    if proj is None:
+        known = ", ".join(sorted(registry.load(base_dir).keys())) or "(无)"
+        return (False, f"⚠️ 未知项目 '{alias}'。已注册：{known}")
+    bindings.bind(base_dir, chat_id, alias)
+    ok, err = rename(chat_id, f"🤖 {alias}")
+    note = "" if ok else f"\n⚠️ 自动改名失败（{err}），群名请手动改。"
+    return (True,
+            f"✅ 本群已绑定 '{alias}'（session {proj.get('session')}，"
+            f"目录 {proj.get('dir')}）。{note}")
+
+
+def do_unbind(base_dir, chat_id):
+    """Decide what `/unbind` (sent in a chat) means. Pure. Returns (ok, reply)."""
+    alias = bindings.read_binding(base_dir, chat_id)
+    if alias is None:
+        return (False, "⚠️ 本群未绑定任何项目。")
+    bindings.unbind(base_dir, chat_id)
+    return (True, f"✅ 已解绑 '{alias}'。本群消息改走默认路由（active 指针）。")
+
+
+def do_whoami(base_dir, chat_id):
+    """Report this chat's binding (for `/whoami`). Pure. Returns a reply string."""
+    alias = bindings.read_binding(base_dir, chat_id)
+    if alias is None:
+        return "本群未绑定项目；消息走默认路由（active 指针 / 默认 session）。"
+    proj = registry.get(base_dir, alias)
+    if proj is None:
+        return (f"本群绑定 '{alias}'，但该项目已不在注册表中。"
+                f"请 /unbind，或在电脑上 cc-remote setup --name {alias}。")
+    return (f"本群绑定 '{alias}'（session {proj.get('session')}，"
+            f"目录 {proj.get('dir')}）。")
+
+
+# Only LEADING mention tokens — Feishu injects @-placeholders at the very start
+# of the text when the bot is @'d. Anchoring to ^ means a placeholder-looking
+# substring later in the message (an email, a path, code) is left untouched.
+_MENTION_RE = re.compile(r"^(?:@_(?:user_\d+|all)\s*)+")
+
+
+def strip_mentions(text):
+    """Strip leading Feishu @-mention placeholder tokens (@_user_1 … / @_all)
+    that the platform prepends to a group message's text when the bot is @'d, so
+    a command typed as '@bot /bind web' still parses as '/bind web'. Only leading
+    tokens are removed — a literal '@_user_1' mid-text (in an email, path, or
+    code) is preserved. Plain text is returned unchanged (modulo trim)."""
+    return _MENTION_RE.sub("", text).strip()
+
+
+def resolve_session(base_dir, chat_id, default):
+    """The tmux session a message in `chat_id` routes to. A chat bound to a
+    project → that project's session; an unbound chat (a DM, or an unbound
+    group) → the active pointer or `default` (the legacy single-DM path,
+    untouched). A binding pointing at a since-removed project also falls back.
+    Pure; never raises — routing must not depend on bindings/registry integrity."""
+    alias = bindings.read_binding(base_dir, chat_id)
+    if alias:
+        proj = registry.get(base_dir, alias)
+        if proj and proj.get("session"):
+            return proj["session"]
+    return registry.resolve_target(base_dir, default)
 
 
 def _send_screenshot(chat_id, session):
@@ -133,9 +210,10 @@ def _handle_image(msg, chat_id):
     if not path:
         feishu.send_text(_client, chat_id, "⚠️ 图片下载失败")
         return
-    pending_images.append(path)
+    queue = pending_images.setdefault(chat_id, [])
+    queue.append(path)
     feishu.send_text(_client, chat_id,
-                     f"📷 图片已接收 (共 {len(pending_images)} 张待处理),发文字时一起带给 Claude")
+                     f"📷 图片已接收 (共 {len(queue)} 张待处理),发文字时一起带给 Claude")
 
 
 def handle_message(event: P2ImMessageReceiveV1) -> None:
@@ -146,11 +224,10 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
     if config.ALLOWED_USERS and sender_id not in config.ALLOWED_USERS:
         log.warning(f"Unauthorized user: {sender_id} (not in ALLOWED_USERS)")
         return
-    if msg.chat_type != "p2p":
-        return
 
     chat_id = msg.chat_id
     message_id = msg.message_id
+    is_dm = msg.chat_type == "p2p"
 
     # Drop Feishu redeliveries (at-least-once WS) before any side effect.
     if already_handled(message_id):
@@ -167,6 +244,11 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
         text = json.loads(msg.content).get("text", "").strip()
     except (json.JSONDecodeError, AttributeError):
         return
+    # DMs never carry @-mention placeholders, so leave DM text byte-for-byte as
+    # before (the legacy single-DM path). Only group text gets mention-stripped,
+    # so '@bot /bind web' in a group parses as '/bind web'.
+    if not is_dm:
+        text = strip_mentions(text)
     if not text or text.startswith("#"):
         return
 
@@ -187,9 +269,36 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
                          format_projects(config.CC_REMOTE_DIR, tmux.session_exists))
         return
 
-    # Everything else routes to the currently-active session (active pointer,
-    # falling back to TMUX_SESSION). Signals/screenshots are per-session.
-    sess = registry.resolve_target(config.CC_REMOTE_DIR, config.TMUX_SESSION)
+    # Group-binding commands. Exact first-token match (not startswith) so a
+    # message like '/binding-web' or '/bind these functions' isn't hijacked, and
+    # gated to non-DM chats so a DM's /switch + active pointer stay untouched
+    # (binding a DM would silently pin it). parts[0] is the command word.
+    parts = text.split()
+    cmd = parts[0] if parts else ""
+
+    if cmd == "/bind" and not is_dm:
+        if len(parts) < 2:
+            feishu.send_text(_client, chat_id,
+                             "用法：/bind <项目别名>。在该项目对应的群里发送。")
+            return
+        rename = lambda cid, name: feishu.update_chat_name(_client, cid, name)
+        _ok, reply = do_bind(config.CC_REMOTE_DIR, chat_id, parts[1], rename)
+        feishu.send_text(_client, chat_id, reply)
+        return
+
+    if cmd == "/unbind" and not is_dm:
+        _ok, reply = do_unbind(config.CC_REMOTE_DIR, chat_id)
+        feishu.send_text(_client, chat_id, reply)
+        return
+
+    if cmd == "/whoami" and not is_dm:
+        feishu.send_text(_client, chat_id, do_whoami(config.CC_REMOTE_DIR, chat_id))
+        return
+
+    # Everything else routes to the chat's bound project, or — for a DM / unbound
+    # chat — the currently-active session (active pointer, falling back to
+    # TMUX_SESSION). Signals/screenshots are per-session.
+    sess = resolve_session(config.CC_REMOTE_DIR, chat_id, config.TMUX_SESSION)
     sig_dir = config.signal_dir(sess)
 
     if text == "/status":
@@ -228,8 +337,9 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
         feishu.send_text(_client, chat_id, f"⚠️ tmux session '{sess}' not found. Start it first.")
         return
 
-    if pending_images:
-        payload = "\n".join(f"[图片] {p}" for p in pending_images) + "\n" + text
+    queued = pending_images.get(chat_id, [])
+    if queued:
+        payload = "\n".join(f"[图片] {p}" for p in queued) + "\n" + text
     else:
         payload = text
 
@@ -239,7 +349,7 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
     sig = signals.write_signal(sig_dir, message_id, chat_id, reaction_id)
     if tmux.send_text(sess, payload):
         log.info(f"Sent to tmux[{sess}]: {text[:80]}{'...' if len(text) > 80 else ''}")
-        pending_images.clear()
+        pending_images.pop(chat_id, None)
     else:
         if sig:
             try:

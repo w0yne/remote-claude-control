@@ -158,3 +158,27 @@ def download_image(client, message_id, image_key, dest_path):
     except Exception as e:
         log.error(f"download_image error: {e}")
         return None
+
+
+def update_chat_name(client, chat_id, name):
+    """Rename a group chat. Returns (ok, err): (True, None) on success,
+    (False, reason) otherwise. Never raises — best-effort like the rest of this
+    module, so a rename hiccup can't fail a /bind. Requires the im:chat scope."""
+    if not client or not chat_id:
+        return (False, "no client/chat_id")
+    try:
+        from lark_oapi.api.im.v1 import UpdateChatRequest, UpdateChatRequestBody
+
+        resp = client.im.v1.chat.update(
+            UpdateChatRequest.builder()
+            .chat_id(chat_id)
+            .request_body(UpdateChatRequestBody.builder().name(name).build())
+            .build()
+        )
+        if resp.success():
+            return (True, None)
+        log.error(f"update_chat_name failed: code={getattr(resp, 'code', '?')}")
+        return (False, f"code={getattr(resp, 'code', '?')}")
+    except Exception as e:
+        log.error(f"update_chat_name error: {e}")
+        return (False, str(e))
