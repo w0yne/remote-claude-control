@@ -121,3 +121,29 @@ def test_send_card_exception_is_caught():
 def test_send_card_no_client_returns_false():
     assert feishu.send_card(None, "chat_web", {"schema": "2.0"}) is False
     assert feishu.send_card(_msg_client(lambda req: _Resp(True)), "", {}) is False
+
+
+# ---- send_markdown (card-first, text fallback) ----
+
+def test_send_markdown_card_success_skips_text(monkeypatch):
+    sent = {"card": 0, "text": 0}
+    monkeypatch.setattr(feishu, "send_card", lambda *a, **k: sent.__setitem__("card", sent["card"] + 1) or True)
+    monkeypatch.setattr(feishu, "send_text", lambda *a, **k: sent.__setitem__("text", sent["text"] + 1) or True)
+    ok = feishu.send_markdown(object(), "chat_web", "**md**", "plain fallback")
+    assert ok is True
+    assert sent == {"card": 1, "text": 0}  # card sent, text NOT sent
+
+
+def test_send_markdown_card_failure_falls_back_to_text(monkeypatch):
+    # Card fails -> the fallback text (not the md) must be sent as plain text.
+    captured = {}
+    monkeypatch.setattr(feishu, "send_card", lambda *a, **k: False)
+    monkeypatch.setattr(feishu, "send_text",
+                        lambda c, rid, text, rid_type="chat_id": captured.__setitem__("text", text) or True)
+    ok = feishu.send_markdown(object(), "chat_web", "**md**", "plain fallback")
+    assert ok is True
+    assert captured["text"] == "plain fallback"  # the fallback text, not the md
+
+
+def test_send_markdown_no_client_returns_false():
+    assert feishu.send_markdown(None, "chat_web", "md", "fb") is False

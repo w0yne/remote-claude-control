@@ -231,3 +231,19 @@ def send_card(client, receive_id, card, receive_id_type="chat_id"):
     except Exception as e:
         log.error(f"send_card failed: {e}")
         return False
+
+
+def send_markdown(client, receive_id, md_text, text_fallback,
+                  receive_id_type="chat_id", header_title=None,
+                  header_template=None):
+    """Send md_text as a v2 markdown card; if the card API fails, fall back to
+    sending text_fallback as plain text. The card-failure-never-loses-the-message
+    contract lives here. md_text and text_fallback are already truncated to
+    their channel's limit by the caller (cards and plain text have different
+    ceilings). Returns True if either send confirmed."""
+    if not client or not receive_id:
+        return False
+    card = build_markdown_card(md_text, header_title, header_template)
+    if send_card(client, receive_id, card, receive_id_type):
+        return True
+    return send_text(client, receive_id, text_fallback, receive_id_type)
