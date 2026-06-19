@@ -95,6 +95,106 @@ def _reply_payloads(reply_text):
             _truncate(reply_text, config.MAX_TEXT_CHARS))
 
 
+# Footer (status-line style): model · ctx% · git branch. Mirrors the Claude
+# Code statusline so a remote reply shows the same at-a-glance state.
+_MODEL_NAMES = {
+    "opus": "Opus",
+    "sonnet": "Sonnet",
+    "haiku": "Haiku",
+    "fable": "Fable",
+}
+
+
+def _pretty_model(model_id):
+    """'claude-opus-4-8' -> 'Opus 4.8'. Unknown shapes return the raw id so we
+    never invent a name (don't guess — show what's there)."""
+    if not model_id:
+        return model_id
+    parts = model_id.split("-")
+    # find a known family token and the version tokens right after it
+    for i, tok in enumerate(parts):
+        if tok in _MODEL_NAMES:
+            ver = []
+            for v in parts[i + 1:]:
+                if v.isdigit() and len(ver) < 2:  # major.minor only; skip date suffixes
+                    ver.append(v)
+                else:
+                    break
+            if ver:
+                return f"{_MODEL_NAMES[tok]} {'.'.join(ver)}"
+            return _MODEL_NAMES[tok]
+    return model_id
+
+
+def _fmt_tokens(n):
+    """Mirror the statusline formatter: 1000000->'1M', 1234567->'1.2M',
+    190095->'190K', 559->'0.6K'."""
+    if n >= 1_000_000:
+        v = n / 1_000_000
+        return f"{v:.0f}M" if v == int(v) else f"{v:.1f}M"
+    if n >= 10_000 or n == 0:
+        return f"{n / 1000:.0f}K"
+    return f"{n / 1000:.1f}K"
+
+
+def build_footer(meta):
+    """Compose the footer string from a turn-meta dict. Each segment is included
+    only when its data is present (missing data -> skip the segment, never error
+    or show blanks). Segments joined by ' · ':
+      🤖 <model> · ctx <pct>% (<used>/<size>) · ⎇ <branch>[*]
+    Returns "" when nothing is available."""
+    segs = []
+    model = meta.get("model")
+    if model:
+        segs.append(f"🤖 {_pretty_model(model)}")
+    ctx = meta.get("ctx_tokens")
+    if ctx:
+        size = config.CONTEXT_WINDOW_SIZE
+        if size > 0:
+            pct = round(ctx / size * 100)
+            segs.append(f"ctx {pct}% ({_fmt_tokens(ctx)}/{_fmt_tokens(size)})")
+    branch = meta.get("gitBranch")
+    if branch:
+        segs.append(f"⎇ {branch}{'*' if meta.get('dirty') else ''}")
+    return " · ".join(segs)
+
+
+def extract_turn_meta(transcript_path):
+    """Read the last assistant record's model, gitBranch, and current context
+    token count (input + cache_read + cache_creation — the instantaneous
+    context size, matching the statusline's total_input_tokens). Best-effort:
+    any problem -> {} so the footer is simply omitted."""
+    if not transcript_path or not os.path.exists(transcript_path):
+        return {}
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        log(f"could not read transcript for meta: {e}")
+        return {}
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get("type") != "assistant":
+            continue
+        msg = obj.get("message") or {}
+        usage = msg.get("usage") or {}
+        ctx = (usage.get("input_tokens", 0)
+               + usage.get("cache_read_input_tokens", 0)
+               + usage.get("cache_creation_input_tokens", 0))
+        return {
+            "model": msg.get("model"),
+            "ctx_tokens": ctx,
+            "gitBranch": obj.get("gitBranch"),
+        }
+    return {}
+
+
 def resolve_session_dirs():
     """The (signal_dir, screenshot_dir) THIS hook owns — derived from the tmux
     session it's firing inside. Returns (None, None) if not in any tmux session.

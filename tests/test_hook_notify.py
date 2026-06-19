@@ -71,3 +71,75 @@ def test_process_signals_empty_reply_sends_no_markdown(monkeypatch):
     hook_notify.process_signals(object(), ["sig1"], "img.webp", "")  # no reply text
 
     assert calls == []  # screenshot still sent, but no card/text reply
+
+
+# ---- footer (status-line style: model · ctx% · git branch) ----
+import json
+
+
+def test_pretty_model_maps_known_ids():
+    assert hook_notify._pretty_model("claude-opus-4-8") == "Opus 4.8"
+    assert hook_notify._pretty_model("claude-sonnet-4-6") == "Sonnet 4.6"
+    assert hook_notify._pretty_model("claude-haiku-4-5-20251001") == "Haiku 4.5"
+
+
+def test_pretty_model_unknown_returns_raw():
+    assert hook_notify._pretty_model("claude-future-9-9") == "claude-future-9-9"
+    assert hook_notify._pretty_model("") == ""
+
+
+def test_fmt_tokens_like_statusline():
+    assert hook_notify._fmt_tokens(1000000) == "1M"
+    assert hook_notify._fmt_tokens(1234567) == "1.2M"
+    assert hook_notify._fmt_tokens(190095) == "190K"
+    assert hook_notify._fmt_tokens(559) == "0.6K"
+
+
+def test_build_footer_full(monkeypatch):
+    monkeypatch.setattr(config, "CONTEXT_WINDOW_SIZE", 1000000)
+    foot = hook_notify.build_footer(
+        {"model": "claude-opus-4-8", "ctx_tokens": 190095,
+         "gitBranch": "dev-card-markdown", "dirty": True})
+    assert "Opus 4.8" in foot
+    assert "ctx 19% (190K/1M)" in foot
+    assert "⎇ dev-card-markdown*" in foot   # dirty marker
+    assert foot.count("·") == 2             # three segments joined by ·
+
+
+def test_build_footer_skips_missing_segments(monkeypatch):
+    monkeypatch.setattr(config, "CONTEXT_WINDOW_SIZE", 1000000)
+    # only a model, no ctx, no branch
+    foot = hook_notify.build_footer({"model": "claude-opus-4-8"})
+    assert foot == "🤖 Opus 4.8"
+
+
+def test_build_footer_clean_branch_no_star(monkeypatch):
+    monkeypatch.setattr(config, "CONTEXT_WINDOW_SIZE", 1000000)
+    foot = hook_notify.build_footer(
+        {"gitBranch": "main", "dirty": False})
+    assert "⎇ main" in foot and "*" not in foot
+
+
+def test_build_footer_empty_meta_returns_empty():
+    assert hook_notify.build_footer({}) == ""
+
+
+def test_extract_turn_meta_reads_last_assistant(tmp_path):
+    tp = tmp_path / "t.jsonl"
+    rows = [
+        {"type": "user", "message": {"content": "hi"}},
+        {"type": "assistant", "gitBranch": "feature-x",
+         "message": {"model": "claude-opus-4-8",
+                     "usage": {"input_tokens": 5,
+                               "cache_read_input_tokens": 100000,
+                               "cache_creation_input_tokens": 2000}}},
+    ]
+    tp.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    meta = hook_notify.extract_turn_meta(str(tp))
+    assert meta["model"] == "claude-opus-4-8"
+    assert meta["ctx_tokens"] == 102005   # input + cache_read + cache_creation
+    assert meta["gitBranch"] == "feature-x"
+
+
+def test_extract_turn_meta_missing_file_returns_empty():
+    assert hook_notify.extract_turn_meta("/no/such/path") == {}
