@@ -186,15 +186,26 @@ def update_chat_name(client, chat_id, name):
         return (False, str(e))
 
 
-def build_markdown_card(md_text, header_title=None, header_template=None):
+def build_markdown_card(md_text, header_title=None, header_template=None,
+                        footer=None):
     """Build a Feishu card JSON v2 (schema 2.0) carrying one markdown element.
     v2 is required for headings/inline-code/table/quote to render (the legacy
     no-schema card's tag:markdown does not support them — verified 2026-06-19).
-    A header is added only when header_title is given."""
+    A header is added only when header_title is given. A non-empty `footer`
+    string is appended as a small grey note at the bottom — v2 dropped the note
+    component, so it's a plain_text element with notation size + grey color."""
+    elements = [{"tag": "markdown", "content": md_text}]
+    if footer:
+        elements.append({
+            "tag": "plain_text",
+            "content": footer,
+            "text_size": "notation",
+            "text_color": "grey",
+        })
     card = {
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
-        "body": {"elements": [{"tag": "markdown", "content": md_text}]},
+        "body": {"elements": elements},
     }
     if header_title:
         header = {"title": {"tag": "plain_text", "content": header_title}}
@@ -235,15 +246,17 @@ def send_card(client, receive_id, card, receive_id_type="chat_id"):
 
 def send_markdown(client, receive_id, md_text, text_fallback,
                   receive_id_type="chat_id", header_title=None,
-                  header_template=None):
+                  header_template=None, footer=None):
     """Send md_text as a v2 markdown card; if the card API fails, fall back to
     sending text_fallback as plain text. The card-failure-never-loses-the-message
     contract lives here. md_text and text_fallback are already truncated to
     their channel's limit by the caller (cards and plain text have different
-    ceilings). Returns True if either send confirmed."""
+    ceilings). `footer`, if given, is a small grey note at the card bottom; it
+    rides only on the card — the plain-text fallback stays clean. Returns True
+    if either send confirmed."""
     if not client or not receive_id:
         return False
-    card = build_markdown_card(md_text, header_title, header_template)
+    card = build_markdown_card(md_text, header_title, header_template, footer)
     if send_card(client, receive_id, card, receive_id_type):
         return True
     return send_text(client, receive_id, text_fallback, receive_id_type)

@@ -88,6 +88,29 @@ def test_build_markdown_card_header_without_template_omits_template():
     assert "template" not in card["header"]
 
 
+def test_build_markdown_card_no_footer_by_default():
+    card = feishu.build_markdown_card("body")
+    # Only the markdown element — no trailing footer note.
+    assert card["body"]["elements"] == [{"tag": "markdown", "content": "body"}]
+
+
+def test_build_markdown_card_footer_appended_as_grey_notation():
+    card = feishu.build_markdown_card("body", footer="🤖 Opus 4.8 · ctx 19%")
+    elems = card["body"]["elements"]
+    assert elems[0] == {"tag": "markdown", "content": "body"}
+    foot = elems[-1]
+    # Footer is a small grey plain_text element (v2 has no note component).
+    assert foot["tag"] == "plain_text"
+    assert foot["content"] == "🤖 Opus 4.8 · ctx 19%"
+    assert foot["text_size"] == "notation"
+    assert foot["text_color"] == "grey"
+
+
+def test_build_markdown_card_empty_footer_not_appended():
+    card = feishu.build_markdown_card("body", footer="")
+    assert card["body"]["elements"] == [{"tag": "markdown", "content": "body"}]
+
+
 # ---- send_card ----
 
 def _msg_client(behavior):
