@@ -40,8 +40,10 @@ def read_transcript_path():
 
 
 def extract_last_assistant_text(transcript_path):
-    """Text of Claude's most recent assistant message that has prose, truncated
-    to MAX_TEXT_CHARS. Skips trailing tool_use-only records."""
+    """Full text of Claude's most recent assistant message that has prose — NO
+    truncation (callers truncate per output channel). Skips trailing
+    tool_use-only records. Returns "" when reply text is disabled
+    (MAX_TEXT_CHARS<=0) or nothing is found."""
     if config.MAX_TEXT_CHARS <= 0 or not transcript_path or not os.path.exists(transcript_path):
         return ""
     try:
@@ -70,11 +72,27 @@ def extract_last_assistant_text(transcript_path):
         ]
         if not texts:
             continue
-        text = "\n".join(texts).strip()
-        if len(text) > config.MAX_TEXT_CHARS:
-            text = text[: config.MAX_TEXT_CHARS] + "\n…(已截断，完整内容见截图)"
-        return text
+        return "\n".join(texts).strip()
     return ""
+
+
+def _truncate(text, limit):
+    """Truncate to `limit` chars, appending a 'see screenshot' notice when cut.
+    limit<=0 means no truncation here (the reply-disabled switch is in
+    extract_last_assistant_text)."""
+    if limit > 0 and len(text) > limit:
+        return text[:limit] + "\n…（已截断，完整内容见截图）"
+    return text
+
+
+def _reply_payloads(reply_text):
+    """(card_md, text_fallback) for one reply, each truncated to its channel's
+    ceiling: the card to MAX_CARD_CHARS, the plain-text fallback to
+    MAX_TEXT_CHARS. Cards and text have different limits, so each is cut
+    independently — the fallback must fit plain text even when the card holds
+    more."""
+    return (_truncate(reply_text, config.MAX_CARD_CHARS),
+            _truncate(reply_text, config.MAX_TEXT_CHARS))
 
 
 def resolve_session_dirs():
@@ -93,9 +111,10 @@ def resolve_session_dirs():
 
 
 def process_signals(client, signal_paths, image_path, reply_text):
-    """Complete all pending commands for this turn. Reply text + screenshot are
-    sent ONCE PER CHAT (not per signal — multiple messages can collapse into one
-    turn), but each triggering message's reaction is flipped individually."""
+    """Complete all pending commands for this turn. The reply (as a v2 markdown
+    card, falling back to plain text) + screenshot are sent ONCE PER CHAT (not
+    per signal — multiple messages can collapse into one turn), but each
+    triggering message's reaction is flipped individually."""
     by_chat = {}
     for sp in signal_paths:
         sig = signals.read_signal(sp)
@@ -106,9 +125,10 @@ def process_signals(client, signal_paths, image_path, reply_text):
         by_chat.setdefault(sig.get("chat_id"), []).append(
             (sig.get("message_id"), sig.get("reaction_id"), sp)
         )
+    card_md, text_fallback = _reply_payloads(reply_text)
     for chat_id, items in by_chat.items():
         if reply_text:
-            feishu.send_text(client, chat_id, reply_text)
+            feishu.send_markdown(client, chat_id, card_md, text_fallback)
         sent = bool(image_path) and feishu.send_image(client, chat_id, image_path)
         if not sent:
             feishu.send_text(client, chat_id, "⚠️ 命令已执行，但截图生成/发送失败")
