@@ -40,8 +40,10 @@ def read_transcript_path():
 
 
 def extract_last_assistant_text(transcript_path):
-    """Text of Claude's most recent assistant message that has prose, truncated
-    to MAX_TEXT_CHARS. Skips trailing tool_use-only records."""
+    """Full text of Claude's most recent assistant message that has prose — NO
+    truncation (callers truncate per output channel). Skips trailing
+    tool_use-only records. Returns "" when reply text is disabled
+    (MAX_TEXT_CHARS<=0) or nothing is found."""
     if config.MAX_TEXT_CHARS <= 0 or not transcript_path or not os.path.exists(transcript_path):
         return ""
     try:
@@ -70,11 +72,127 @@ def extract_last_assistant_text(transcript_path):
         ]
         if not texts:
             continue
-        text = "\n".join(texts).strip()
-        if len(text) > config.MAX_TEXT_CHARS:
-            text = text[: config.MAX_TEXT_CHARS] + "\n…(已截断，完整内容见截图)"
-        return text
+        return "\n".join(texts).strip()
     return ""
+
+
+def _truncate(text, limit):
+    """Truncate to `limit` chars, appending a 'see screenshot' notice when cut.
+    limit<=0 means no truncation here (the reply-disabled switch is in
+    extract_last_assistant_text)."""
+    if limit > 0 and len(text) > limit:
+        return text[:limit] + "\n…（已截断，完整内容见截图）"
+    return text
+
+
+def _reply_payloads(reply_text):
+    """(card_md, text_fallback) for one reply, each truncated to its channel's
+    ceiling: the card to MAX_CARD_CHARS, the plain-text fallback to
+    MAX_TEXT_CHARS. Cards and text have different limits, so each is cut
+    independently — the fallback must fit plain text even when the card holds
+    more."""
+    return (_truncate(reply_text, config.MAX_CARD_CHARS),
+            _truncate(reply_text, config.MAX_TEXT_CHARS))
+
+
+# Footer (status-line style): model · ctx% · git branch. Mirrors the Claude
+# Code statusline so a remote reply shows the same at-a-glance state.
+_MODEL_NAMES = {
+    "opus": "Opus",
+    "sonnet": "Sonnet",
+    "haiku": "Haiku",
+    "fable": "Fable",
+}
+
+
+def _pretty_model(model_id):
+    """'claude-opus-4-8' -> 'Opus 4.8'. Unknown shapes return the raw id so we
+    never invent a name (don't guess — show what's there)."""
+    if not model_id:
+        return model_id
+    parts = model_id.split("-")
+    # find a known family token and the version tokens right after it
+    for i, tok in enumerate(parts):
+        if tok in _MODEL_NAMES:
+            ver = []
+            for v in parts[i + 1:]:
+                if v.isdigit() and len(ver) < 2:  # major.minor only; skip date suffixes
+                    ver.append(v)
+                else:
+                    break
+            if ver:
+                return f"{_MODEL_NAMES[tok]} {'.'.join(ver)}"
+            return _MODEL_NAMES[tok]
+    return model_id
+
+
+def _fmt_tokens(n):
+    """Mirror the statusline formatter: 1000000->'1M', 1234567->'1.2M',
+    190095->'190K', 559->'0.6K'."""
+    if n >= 1_000_000:
+        v = n / 1_000_000
+        return f"{v:.0f}M" if v == int(v) else f"{v:.1f}M"
+    if n >= 10_000 or n == 0:
+        return f"{n / 1000:.0f}K"
+    return f"{n / 1000:.1f}K"
+
+
+def build_footer(meta):
+    """Compose the footer string from a turn-meta dict. Each segment is included
+    only when its data is present (missing data -> skip the segment, never error
+    or show blanks). Segments joined by ' · ':
+      🤖 <model> · ctx <pct>% (<used>/<size>) · ⎇ <branch>[*]
+    Returns "" when nothing is available."""
+    segs = []
+    model = meta.get("model")
+    if model:
+        segs.append(f"🤖 {_pretty_model(model)}")
+    ctx = meta.get("ctx_tokens")
+    if ctx:
+        size = config.CONTEXT_WINDOW_SIZE
+        if size > 0:
+            pct = round(ctx / size * 100)
+            segs.append(f"ctx {pct}% ({_fmt_tokens(ctx)}/{_fmt_tokens(size)})")
+    branch = meta.get("gitBranch")
+    if branch:
+        segs.append(f"⎇ {branch}{'*' if meta.get('dirty') else ''}")
+    return " · ".join(segs)
+
+
+def extract_turn_meta(transcript_path):
+    """Read the last assistant record's model, gitBranch, and current context
+    token count (input + cache_read + cache_creation — the instantaneous
+    context size, matching the statusline's total_input_tokens). Best-effort:
+    any problem -> {} so the footer is simply omitted."""
+    if not transcript_path or not os.path.exists(transcript_path):
+        return {}
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        log(f"could not read transcript for meta: {e}")
+        return {}
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get("type") != "assistant":
+            continue
+        msg = obj.get("message") or {}
+        usage = msg.get("usage") or {}
+        ctx = (usage.get("input_tokens", 0)
+               + usage.get("cache_read_input_tokens", 0)
+               + usage.get("cache_creation_input_tokens", 0))
+        return {
+            "model": msg.get("model"),
+            "ctx_tokens": ctx,
+            "gitBranch": obj.get("gitBranch"),
+        }
+    return {}
 
 
 def resolve_session_dirs():
@@ -92,10 +210,12 @@ def resolve_session_dirs():
     return (config.signal_dir(session), config.screenshot_dir(session))
 
 
-def process_signals(client, signal_paths, image_path, reply_text):
-    """Complete all pending commands for this turn. Reply text + screenshot are
-    sent ONCE PER CHAT (not per signal — multiple messages can collapse into one
-    turn), but each triggering message's reaction is flipped individually."""
+def process_signals(client, signal_paths, image_path, reply_text, footer=""):
+    """Complete all pending commands for this turn. The reply (as a v2 markdown
+    card, falling back to plain text) + screenshot are sent ONCE PER CHAT (not
+    per signal — multiple messages can collapse into one turn), but each
+    triggering message's reaction is flipped individually. `footer`, when given,
+    is a small grey status-line note appended to the card (not the fallback)."""
     by_chat = {}
     for sp in signal_paths:
         sig = signals.read_signal(sp)
@@ -106,9 +226,11 @@ def process_signals(client, signal_paths, image_path, reply_text):
         by_chat.setdefault(sig.get("chat_id"), []).append(
             (sig.get("message_id"), sig.get("reaction_id"), sp)
         )
+    card_md, text_fallback = _reply_payloads(reply_text)
     for chat_id, items in by_chat.items():
         if reply_text:
-            feishu.send_text(client, chat_id, reply_text)
+            feishu.send_markdown(client, chat_id, card_md, text_fallback,
+                                 footer=footer)
         sent = bool(image_path) and feishu.send_image(client, chat_id, image_path)
         if not sent:
             feishu.send_text(client, chat_id, "⚠️ 命令已执行，但截图生成/发送失败")
@@ -150,14 +272,21 @@ def main():
         return
 
     client = feishu.build_client(config.APP_ID, config.APP_SECRET)
-    reply_text = extract_last_assistant_text(read_transcript_path())
+    transcript = read_transcript_path()
+    reply_text = extract_last_assistant_text(transcript)
+    footer = ""
+    if config.CARD_FOOTER:
+        try:
+            footer = build_footer(extract_turn_meta(transcript))
+        except Exception as e:
+            log(f"footer build failed (omitting): {e}")
     image_path = None
     try:
         image_path = screenshot.render(session, shot_dir,
                                        config.CAPTURE_LINES, config.WEBP_QUALITY)
     except Exception as e:
         log(f"screenshot render failed: {e}")
-    process_signals(client, fresh, image_path, reply_text)
+    process_signals(client, fresh, image_path, reply_text, footer=footer)
     screenshot.prune_dir(shot_dir, config.KEEP_SCREENSHOTS)
 
 

@@ -20,8 +20,10 @@ def build_client(app_id, app_secret):
     return lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
 
 
-def send_text(client, chat_id, text):
-    """Send a plain-text message to a chat. Returns True on confirmed send."""
+def send_text(client, chat_id, text, receive_id_type="chat_id"):
+    """Send a plain-text message to a chat. Returns True on confirmed send.
+    receive_id_type lets callers target open_id etc.; defaults to chat_id so
+    existing positional callers are unchanged."""
     if not client or not chat_id:
         return False
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
@@ -29,7 +31,7 @@ def send_text(client, chat_id, text):
     try:
         resp = client.im.v1.message.create(
             CreateMessageRequest.builder()
-            .receive_id_type("chat_id")
+            .receive_id_type(receive_id_type)
             .request_body(
                 CreateMessageRequestBody.builder()
                 .receive_id(chat_id)
@@ -182,3 +184,80 @@ def update_chat_name(client, chat_id, name):
     except Exception as e:
         log.error(f"update_chat_name error: {e}")
         return (False, str(e))
+
+
+def build_markdown_card(md_text, header_title=None, header_template=None,
+                        footer=None):
+    """Build a Feishu card JSON v2 (schema 2.0) carrying one markdown element.
+    v2 is required for headings/inline-code/table/quote to render (the legacy
+    no-schema card's tag:markdown does not support them — verified 2026-06-19).
+    A header is added only when header_title is given. A non-empty `footer`
+    string is appended as a small grey note at the bottom: a divider (hr) then a
+    grey markdown line. v2 body elements only accept known tags — `plain_text`
+    is NOT one (Feishu rejects it, code 200621) — so the grey text rides on a
+    markdown <font> element rather than a plain_text element."""
+    elements = [{"tag": "markdown", "content": md_text}]
+    if footer:
+        elements.append({"tag": "hr"})
+        elements.append({
+            "tag": "markdown",
+            "content": f"<font color='grey'>{footer}</font>",
+        })
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "body": {"elements": elements},
+    }
+    if header_title:
+        header = {"title": {"tag": "plain_text", "content": header_title}}
+        if header_template:
+            header["template"] = header_template
+        card["header"] = header
+    return card
+
+
+def send_card(client, receive_id, card, receive_id_type="chat_id"):
+    """Send an interactive card (msg_type=interactive). `card` is a card dict
+    (see build_markdown_card). Best-effort like send_text: never raises,
+    returns True only on confirmed send. Uses the same im.v1.message.create as
+    send_text, so the existing im:message:send_as_bot scope covers it
+    (empirically confirmed 2026-06-19)."""
+    if not client or not receive_id:
+        return False
+    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+    try:
+        resp = client.im.v1.message.create(
+            CreateMessageRequest.builder()
+            .receive_id_type(receive_id_type)
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(receive_id)
+                .msg_type("interactive")
+                .content(json.dumps(card))
+                .build()
+            )
+            .build()
+        )
+        return bool(resp.success())
+    except Exception as e:
+        log.error(f"send_card failed: {e}")
+        return False
+
+
+def send_markdown(client, receive_id, md_text, text_fallback,
+                  receive_id_type="chat_id", header_title=None,
+                  header_template=None, footer=None):
+    """Send md_text as a v2 markdown card; if the card API fails, fall back to
+    sending text_fallback as plain text. The card-failure-never-loses-the-message
+    contract lives here. md_text and text_fallback are already truncated to
+    their channel's limit by the caller (cards and plain text have different
+    ceilings). `footer`, if given, is a small grey note at the card bottom; it
+    rides only on the card — the plain-text fallback stays clean. Returns True
+    if either send confirmed."""
+    if not client or not receive_id:
+        return False
+    card = build_markdown_card(md_text, header_title, header_template, footer)
+    if send_card(client, receive_id, card, receive_id_type):
+        return True
+    return send_text(client, receive_id, text_fallback, receive_id_type)

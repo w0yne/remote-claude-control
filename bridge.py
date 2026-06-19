@@ -265,8 +265,9 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
         return
 
     if text == "/projects":
-        feishu.send_text(_client, chat_id,
-                         format_projects(config.CC_REMOTE_DIR, tmux.session_exists))
+        listing = format_projects(config.CC_REMOTE_DIR, tmux.session_exists)
+        feishu.send_markdown(_client, chat_id, listing, listing,
+                             header_title="项目列表")
         return
 
     # Group-binding commands. Exact first-token match (not startswith) so a

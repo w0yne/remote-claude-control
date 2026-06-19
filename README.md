@@ -292,6 +292,20 @@ cc-remote projects rm projB                   # 注销
 > 私聊不受影响：未绑定的会话（私聊，或没 `/bind` 过的群）仍走 `/switch` + active 指针的老逻辑。
 > 群里若需要 @bot 才能触发，命令前缀照常识别（`@bot /bind web` 等价于 `/bind web`）。
 
+## 富文本回复（飞书卡片 markdown）
+
+Claude 每轮的回复正文与 `/projects` 列表以飞书 **消息卡片（card JSON v2）** 的
+markdown 组件发送，标题、**粗体**、`行内代码`、代码块、有序/无序列表、表格、引用、
+链接都会被渲染成真正的富文本。其余命令回执（如 `/switch`、`/bind` 的结果）仍是纯文本。
+
+- 发送卡片复用既有的 `im:message:send_as_bot` 权限，**无需额外 scope**。
+- 任何一条卡片发送失败时，会自动降级为纯文本重发，保证消息不丢。
+- 回复过长会被截断并提示「完整内容见截图」（截图照常发送）。卡片可容纳的字符数由
+  `MAX_CARD_CHARS` 控制（默认 8000，保守值；纯文本降级仍按 `MAX_TEXT_CHARS`，默认 4000）。
+- 回复卡片底部带一行状态页脚（仿 Claude Code 的 statusline）：`🤖 <模型> · ctx <占比>%
+  (<已用>/<上限>) · ⎇ <分支>`，缺数据的段会自动省略。用 `CARD_FOOTER=false` 关闭整行页脚。
+  上下文占比的分母由 `CONTEXT_WINDOW_SIZE` 控制（默认 200000；用 1M 上下文请设为 `1000000`）。
+
 ## 飞书应用配置
 
 1. [飞书开放平台](https://open.feishu.cn/) → 创建企业自建应用
