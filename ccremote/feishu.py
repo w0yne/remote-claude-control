@@ -182,3 +182,21 @@ def update_chat_name(client, chat_id, name):
     except Exception as e:
         log.error(f"update_chat_name error: {e}")
         return (False, str(e))
+
+
+def build_markdown_card(md_text, header_title=None, header_template=None):
+    """Build a Feishu card JSON v2 (schema 2.0) carrying one markdown element.
+    v2 is required for headings/inline-code/table/quote to render (the legacy
+    no-schema card's tag:markdown does not support them — verified 2026-06-19).
+    A header is added only when header_title is given."""
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "body": {"elements": [{"tag": "markdown", "content": md_text}]},
+    }
+    if header_title:
+        header = {"title": {"tag": "plain_text", "content": header_title}}
+        if header_template:
+            header["template"] = header_template
+        card["header"] = header
+    return card

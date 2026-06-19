@@ -60,3 +60,29 @@ def test_update_chat_name_no_client_returns_false():
     ok, err = feishu.update_chat_name(None, "chat_web", "🤖 web")
     assert ok is False
     assert err
+
+
+# ---- build_markdown_card (v2 schema) ----
+
+def test_build_markdown_card_is_v2_with_body_elements():
+    card = feishu.build_markdown_card("**hi**")
+    assert card["schema"] == "2.0"
+    elems = card["body"]["elements"]
+    assert elems == [{"tag": "markdown", "content": "**hi**"}]
+
+
+def test_build_markdown_card_no_header_by_default():
+    card = feishu.build_markdown_card("x")
+    assert "header" not in card
+
+
+def test_build_markdown_card_with_header_title_and_template():
+    card = feishu.build_markdown_card("x", header_title="项目列表",
+                                      header_template="blue")
+    assert card["header"]["title"] == {"tag": "plain_text", "content": "项目列表"}
+    assert card["header"]["template"] == "blue"
+
+
+def test_build_markdown_card_header_without_template_omits_template():
+    card = feishu.build_markdown_card("x", header_title="标题")
+    assert "template" not in card["header"]
