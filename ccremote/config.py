@@ -39,6 +39,16 @@ SIGNAL_TTL_SEC = 1800
 MAX_TEXT_CHARS = 4000
 MAX_CARD_CHARS = 8000
 SEEN_TTL_SEC = 300
+CARD_FOOTER = True
+CONTEXT_WINDOW_SIZE = 200000
+
+
+def _env_bool(name, default):
+    """Parse a boolean env var. Truthy unless explicitly false-ish."""
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() not in ("false", "0", "no", "off", "")
 
 
 def load_env():
@@ -71,6 +81,7 @@ def _refresh():
     global REACTION_PROCESSING, REACTION_DONE, REACTION_ERROR
     global CAPTURE_LINES, WEBP_QUALITY, KEEP_SCREENSHOTS
     global SIGNAL_TTL_SEC, MAX_TEXT_CHARS, MAX_CARD_CHARS, SEEN_TTL_SEC
+    global CARD_FOOTER, CONTEXT_WINDOW_SIZE
 
     CC_REMOTE_DIR = os.path.expanduser(os.getenv("CC_REMOTE_DIR", "~/.cc_remote"))
     IMAGE_DIR = os.path.join(CC_REMOTE_DIR, "images")
@@ -92,6 +103,8 @@ def _refresh():
     MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "4000"))
     MAX_CARD_CHARS = int(os.getenv("MAX_CARD_CHARS", "8000"))
     SEEN_TTL_SEC = int(os.getenv("SEEN_TTL_SEC", "300"))
+    CARD_FOOTER = _env_bool("CARD_FOOTER", True)
+    CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "200000"))
 
 
 def signal_dir(session):
