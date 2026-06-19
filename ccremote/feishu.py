@@ -20,8 +20,10 @@ def build_client(app_id, app_secret):
     return lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
 
 
-def send_text(client, chat_id, text):
-    """Send a plain-text message to a chat. Returns True on confirmed send."""
+def send_text(client, chat_id, text, receive_id_type="chat_id"):
+    """Send a plain-text message to a chat. Returns True on confirmed send.
+    receive_id_type lets callers target open_id etc.; defaults to chat_id so
+    existing positional callers are unchanged."""
     if not client or not chat_id:
         return False
     from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
@@ -29,7 +31,7 @@ def send_text(client, chat_id, text):
     try:
         resp = client.im.v1.message.create(
             CreateMessageRequest.builder()
-            .receive_id_type("chat_id")
+            .receive_id_type(receive_id_type)
             .request_body(
                 CreateMessageRequestBody.builder()
                 .receive_id(chat_id)
@@ -200,3 +202,32 @@ def build_markdown_card(md_text, header_title=None, header_template=None):
             header["template"] = header_template
         card["header"] = header
     return card
+
+
+def send_card(client, receive_id, card, receive_id_type="chat_id"):
+    """Send an interactive card (msg_type=interactive). `card` is a card dict
+    (see build_markdown_card). Best-effort like send_text: never raises,
+    returns True only on confirmed send. Uses the same im.v1.message.create as
+    send_text, so the existing im:message:send_as_bot scope covers it
+    (empirically confirmed 2026-06-19)."""
+    if not client or not receive_id:
+        return False
+    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+    try:
+        resp = client.im.v1.message.create(
+            CreateMessageRequest.builder()
+            .receive_id_type(receive_id_type)
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(receive_id)
+                .msg_type("interactive")
+                .content(json.dumps(card))
+                .build()
+            )
+            .build()
+        )
+        return bool(resp.success())
+    except Exception as e:
+        log.error(f"send_card failed: {e}")
+        return False

@@ -86,3 +86,38 @@ def test_build_markdown_card_with_header_title_and_template():
 def test_build_markdown_card_header_without_template_omits_template():
     card = feishu.build_markdown_card("x", header_title="标题")
     assert "template" not in card["header"]
+
+
+# ---- send_card ----
+
+def _msg_client(behavior):
+    """Stand-in lark client whose im.v1.message.create calls behavior(req)."""
+    message = types.SimpleNamespace(create=behavior)
+    v1 = types.SimpleNamespace(message=message)
+    return types.SimpleNamespace(im=types.SimpleNamespace(v1=v1))
+
+
+def test_send_card_success():
+    calls = []
+    ok = feishu.send_card(_msg_client(lambda req: calls.append(req) or _Resp(True)),
+                          "chat_web", {"schema": "2.0"})
+    assert ok is True
+    assert len(calls) == 1
+
+
+def test_send_card_api_failure_returns_false():
+    ok = feishu.send_card(_msg_client(lambda req: _Resp(False, code=99)),
+                          "chat_web", {"schema": "2.0"})
+    assert ok is False
+
+
+def test_send_card_exception_is_caught():
+    def boom(req):
+        raise RuntimeError("kapow")
+    ok = feishu.send_card(_msg_client(boom), "chat_web", {"schema": "2.0"})
+    assert ok is False
+
+
+def test_send_card_no_client_returns_false():
+    assert feishu.send_card(None, "chat_web", {"schema": "2.0"}) is False
+    assert feishu.send_card(_msg_client(lambda req: _Resp(True)), "", {}) is False
