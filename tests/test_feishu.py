@@ -94,16 +94,16 @@ def test_build_markdown_card_no_footer_by_default():
     assert card["body"]["elements"] == [{"tag": "markdown", "content": "body"}]
 
 
-def test_build_markdown_card_footer_appended_as_grey_notation():
+def test_build_markdown_card_footer_appended_as_hr_then_grey_markdown():
     card = feishu.build_markdown_card("body", footer="🤖 Opus 4.8 · ctx 19%")
     elems = card["body"]["elements"]
     assert elems[0] == {"tag": "markdown", "content": "body"}
-    foot = elems[-1]
-    # Footer is a small grey plain_text element (v2 has no note component).
-    assert foot["tag"] == "plain_text"
-    assert foot["content"] == "🤖 Opus 4.8 · ctx 19%"
-    assert foot["text_size"] == "notation"
-    assert foot["text_color"] == "grey"
+    # Footer = a divider then a grey markdown line. v2 body elements only accept
+    # known tags (plain_text is NOT one — Feishu rejects it with code 200621),
+    # so grey text must be a markdown <font> element, separated by an hr.
+    assert elems[-2] == {"tag": "hr"}
+    assert elems[-1] == {"tag": "markdown",
+                         "content": "<font color='grey'>🤖 Opus 4.8 · ctx 19%</font>"}
 
 
 def test_build_markdown_card_empty_footer_not_appended():

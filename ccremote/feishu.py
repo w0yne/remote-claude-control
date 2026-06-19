@@ -192,15 +192,16 @@ def build_markdown_card(md_text, header_title=None, header_template=None,
     v2 is required for headings/inline-code/table/quote to render (the legacy
     no-schema card's tag:markdown does not support them — verified 2026-06-19).
     A header is added only when header_title is given. A non-empty `footer`
-    string is appended as a small grey note at the bottom — v2 dropped the note
-    component, so it's a plain_text element with notation size + grey color."""
+    string is appended as a small grey note at the bottom: a divider (hr) then a
+    grey markdown line. v2 body elements only accept known tags — `plain_text`
+    is NOT one (Feishu rejects it, code 200621) — so the grey text rides on a
+    markdown <font> element rather than a plain_text element."""
     elements = [{"tag": "markdown", "content": md_text}]
     if footer:
+        elements.append({"tag": "hr"})
         elements.append({
-            "tag": "plain_text",
-            "content": footer,
-            "text_size": "notation",
-            "text_color": "grey",
+            "tag": "markdown",
+            "content": f"<font color='grey'>{footer}</font>",
         })
     card = {
         "schema": "2.0",
