@@ -175,3 +175,41 @@ def test_process_signals_default_no_footer(monkeypatch):
     assert len(calls) == 1
     _cid, _md, _fb, kw = calls[0]
     assert kw.get("footer", "") == ""  # footer optional; absent by default
+
+
+# ---- main() wires the computed footer through to process_signals ----
+# Regression: main() computed `footer` but called process_signals WITHOUT it,
+# so the card never carried a footer despite all unit tests passing. This drives
+# main() with every dependency stubbed and asserts the footer arrives.
+
+def test_main_passes_computed_footer_to_process_signals(monkeypatch):
+    from ccremote import tmux
+    captured = {}
+
+    monkeypatch.setattr(tmux, "current_session", lambda: "cc")
+    monkeypatch.setattr(config, "signal_dir", lambda s: "/sig")
+    monkeypatch.setattr(config, "screenshot_dir", lambda s: "/shot")
+    monkeypatch.setattr(signals, "list_signals", lambda d: ["sig1"])
+    monkeypatch.setattr(signals, "is_stale", lambda sp, ttl: False)
+    monkeypatch.setattr(config, "APP_ID", "x")
+    monkeypatch.setattr(config, "APP_SECRET", "y")
+    monkeypatch.setattr(config, "CARD_FOOTER", True)
+    monkeypatch.setattr(feishu, "build_client", lambda a, b: object())
+    monkeypatch.setattr(hook_notify, "read_transcript_path", lambda: "/t.jsonl")
+    monkeypatch.setattr(hook_notify, "extract_last_assistant_text", lambda tp: "reply body")
+    monkeypatch.setattr(hook_notify, "extract_turn_meta",
+                        lambda tp: {"model": "claude-opus-4-8", "ctx_tokens": 0,
+                                    "gitBranch": "main"})
+    monkeypatch.setattr(screenshot, "render", lambda *a, **k: "/img.webp")
+    monkeypatch.setattr(screenshot, "prune_dir", lambda *a, **k: None)
+
+    def fake_process(client, paths, image_path, reply_text, footer=""):
+        captured["footer"] = footer
+    monkeypatch.setattr(hook_notify, "process_signals", fake_process)
+
+    hook_notify.main()
+
+    # footer was computed from meta (model + branch) and MUST reach process_signals
+    assert captured.get("footer")            # non-empty
+    assert "Opus 4.8" in captured["footer"]
+    assert "⎇ main" in captured["footer"]

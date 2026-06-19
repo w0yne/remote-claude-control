@@ -286,7 +286,7 @@ def main():
                                        config.CAPTURE_LINES, config.WEBP_QUALITY)
     except Exception as e:
         log(f"screenshot render failed: {e}")
-    process_signals(client, fresh, image_path, reply_text)
+    process_signals(client, fresh, image_path, reply_text, footer=footer)
     screenshot.prune_dir(shot_dir, config.KEEP_SCREENSHOTS)
 
 
