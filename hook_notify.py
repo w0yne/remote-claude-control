@@ -210,11 +210,12 @@ def resolve_session_dirs():
     return (config.signal_dir(session), config.screenshot_dir(session))
 
 
-def process_signals(client, signal_paths, image_path, reply_text):
+def process_signals(client, signal_paths, image_path, reply_text, footer=""):
     """Complete all pending commands for this turn. The reply (as a v2 markdown
     card, falling back to plain text) + screenshot are sent ONCE PER CHAT (not
     per signal — multiple messages can collapse into one turn), but each
-    triggering message's reaction is flipped individually."""
+    triggering message's reaction is flipped individually. `footer`, when given,
+    is a small grey status-line note appended to the card (not the fallback)."""
     by_chat = {}
     for sp in signal_paths:
         sig = signals.read_signal(sp)
@@ -228,7 +229,8 @@ def process_signals(client, signal_paths, image_path, reply_text):
     card_md, text_fallback = _reply_payloads(reply_text)
     for chat_id, items in by_chat.items():
         if reply_text:
-            feishu.send_markdown(client, chat_id, card_md, text_fallback)
+            feishu.send_markdown(client, chat_id, card_md, text_fallback,
+                                 footer=footer)
         sent = bool(image_path) and feishu.send_image(client, chat_id, image_path)
         if not sent:
             feishu.send_text(client, chat_id, "⚠️ 命令已执行，但截图生成/发送失败")
@@ -270,7 +272,14 @@ def main():
         return
 
     client = feishu.build_client(config.APP_ID, config.APP_SECRET)
-    reply_text = extract_last_assistant_text(read_transcript_path())
+    transcript = read_transcript_path()
+    reply_text = extract_last_assistant_text(transcript)
+    footer = ""
+    if config.CARD_FOOTER:
+        try:
+            footer = build_footer(extract_turn_meta(transcript))
+        except Exception as e:
+            log(f"footer build failed (omitting): {e}")
     image_path = None
     try:
         image_path = screenshot.render(session, shot_dir,

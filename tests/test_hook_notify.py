@@ -143,3 +143,35 @@ def test_extract_turn_meta_reads_last_assistant(tmp_path):
 
 def test_extract_turn_meta_missing_file_returns_empty():
     assert hook_notify.extract_turn_meta("/no/such/path") == {}
+
+
+# ---- footer wiring into process_signals ----
+
+def _stub_send(monkeypatch):
+    calls = []
+    monkeypatch.setattr(feishu, "send_markdown",
+                        lambda c, cid, md, fb, **k: calls.append((cid, md, fb, k)) or True)
+    monkeypatch.setattr(feishu, "send_image", lambda *a, **k: True)
+    monkeypatch.setattr(feishu, "del_reaction", lambda *a, **k: None)
+    monkeypatch.setattr(feishu, "add_reaction", lambda *a, **k: None)
+    monkeypatch.setattr(signals, "read_signal",
+                        lambda sp: {"chat_id": "c1", "message_id": "m1", "reaction_id": "r1"})
+    monkeypatch.setattr(screenshot, "safe_remove", lambda *a, **k: None)
+    return calls
+
+
+def test_process_signals_passes_footer_to_send_markdown(monkeypatch):
+    calls = _stub_send(monkeypatch)
+    hook_notify.process_signals(object(), ["sig1"], "img.webp", "hello",
+                                footer="🤖 Opus 4.8 · ctx 19%")
+    assert len(calls) == 1
+    _cid, _md, _fb, kw = calls[0]
+    assert kw.get("footer") == "🤖 Opus 4.8 · ctx 19%"
+
+
+def test_process_signals_default_no_footer(monkeypatch):
+    calls = _stub_send(monkeypatch)
+    hook_notify.process_signals(object(), ["sig1"], "img.webp", "hello")
+    assert len(calls) == 1
+    _cid, _md, _fb, kw = calls[0]
+    assert kw.get("footer", "") == ""  # footer optional; absent by default
