@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
-from ccremote import bindings, config, feishu, registry, screenshot, signals, tmux
+from ccremote import bindings, config, feishu, registry, screenshot, signals, tmux, watchdog
 
 config.load_env()
 logging.basicConfig(
@@ -379,6 +379,21 @@ def main():
         config.APP_ID, config.APP_SECRET, event_handler=handler,
         log_level=lark.LogLevel.INFO if config.LOG_LEVEL == "DEBUG" else lark.LogLevel.WARNING,
     )
+    # WS-liveness watchdog: lark's own reconnect sometimes never recovers after a
+    # network switch (the link dies, the process lives on, messages stop). We
+    # track liveness via lark's public on_reconnecting/on_reconnected hooks (no
+    # SDK changes) and let a watchdog thread exit so launchd relaunches with a
+    # fresh connection — but only once the link has been down past the threshold
+    # AND Feishu is reachable again (never restart into a still-dead network).
+    # WATCHDOG_DOWN_THRESHOLD_SEC=0 disables it entirely.
+    if config.WATCHDOG_DOWN_THRESHOLD_SEC > 0:
+        wd_state = watchdog.WatchdogState()
+        client.on_reconnecting = lambda: wd_state.mark_disconnected(time.time())
+        client.on_reconnected = wd_state.mark_connected
+        watchdog.start_thread(wd_state, config.WATCHDOG_DOWN_THRESHOLD_SEC,
+                              config.WATCHDOG_INTERVAL_SEC)
+        log.info(f"WS watchdog on (threshold {config.WATCHDOG_DOWN_THRESHOLD_SEC}s, "
+                 f"interval {config.WATCHDOG_INTERVAL_SEC}s)")
     log.info(f"Bridge started. Active tmux session: {target} (switch via /switch)")
     log.info("Waiting for messages from Feishu...")
     client.start()

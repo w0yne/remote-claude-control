@@ -41,6 +41,8 @@ MAX_CARD_CHARS = 8000
 SEEN_TTL_SEC = 300
 CARD_FOOTER = True
 CONTEXT_WINDOW_SIZE = 200000
+WATCHDOG_DOWN_THRESHOLD_SEC = 180
+WATCHDOG_INTERVAL_SEC = 60
 
 
 def _env_bool(name, default):
@@ -82,6 +84,7 @@ def _refresh():
     global CAPTURE_LINES, WEBP_QUALITY, KEEP_SCREENSHOTS
     global SIGNAL_TTL_SEC, MAX_TEXT_CHARS, MAX_CARD_CHARS, SEEN_TTL_SEC
     global CARD_FOOTER, CONTEXT_WINDOW_SIZE
+    global WATCHDOG_DOWN_THRESHOLD_SEC, WATCHDOG_INTERVAL_SEC
 
     CC_REMOTE_DIR = os.path.expanduser(os.getenv("CC_REMOTE_DIR", "~/.cc_remote"))
     IMAGE_DIR = os.path.join(CC_REMOTE_DIR, "images")
@@ -105,6 +108,8 @@ def _refresh():
     SEEN_TTL_SEC = int(os.getenv("SEEN_TTL_SEC", "300"))
     CARD_FOOTER = _env_bool("CARD_FOOTER", True)
     CONTEXT_WINDOW_SIZE = int(os.getenv("CONTEXT_WINDOW_SIZE", "200000"))
+    WATCHDOG_DOWN_THRESHOLD_SEC = int(os.getenv("WATCHDOG_DOWN_THRESHOLD_SEC", "180"))
+    WATCHDOG_INTERVAL_SEC = int(os.getenv("WATCHDOG_INTERVAL_SEC", "60"))
 
 
 def signal_dir(session):
