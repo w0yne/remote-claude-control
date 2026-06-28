@@ -98,6 +98,48 @@ def _backend():
     return platform.detect()
 
 
+def _notify_deps():
+    """Lazily import the lark-dependent modules notify needs, from beside this
+    script (like _registry/_backend). Kept out of module import so install/
+    doctor/setup/projects still run on a python without lark_oapi. Returns a
+    namespace with config/feishu/tmux/chat_pointer."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import types as _types
+    from ccremote import chat_pointer, config, feishu, tmux
+    return _types.SimpleNamespace(config=config, feishu=feishu, tmux=tmux,
+                                  chat_pointer=chat_pointer)
+
+
+def _resolve_notify_content(args, stdin):
+    """Notify message text: the positional arg if non-empty, else stdin, else
+    None. Whitespace-only counts as empty."""
+    if args.message and args.message.strip():
+        return args.message.strip()
+    data = stdin.read().strip()
+    return data or None
+
+
+def _resolve_notify_target(args, current_session, base_dir):
+    """Resolve the chat_id notify sends to. Returns (chat_id, err): exactly one
+    is None. --chat wins; else the current tmux session's chat pointer; else an
+    error message explaining what went wrong."""
+    from ccremote import chat_pointer
+    if args.chat:
+        return (args.chat, None)
+    session = current_session()
+    if not session:
+        return (None, "not inside a tmux session (and no --chat given); "
+                      "cc-remote notify must run in a controlled session")
+    chat_id = chat_pointer.read(base_dir, session)
+    if not chat_id:
+        return (None, f"no chat has driven session '{session}' yet "
+                      f"(no pointer at sessions/{session}/chat); "
+                      f"send a message from Feishu first, or pass --chat")
+    return (chat_id, None)
+
+
 def _session_alive(session):
     """tmux has-session check (stdlib subprocess; no ccremote import needed)."""
     return subprocess.run(["tmux", "has-session", "-t", session],
@@ -463,6 +505,52 @@ def cmd_doctor(args):
     return 0 if ok else 1
 
 
+def cmd_notify(args):
+    """Send a proactive notification card back to the Feishu chat that drives
+    this tmux session. Independent of the Stop hook — for telling the user a
+    background task finished after the turn already returned."""
+    try:
+        deps = _notify_deps()
+    except Exception as e:
+        print(f"❌ notify needs lark_oapi + python-dotenv. Use an interpreter "
+              f"that has them, e.g.\n"
+              f"   ~/.pyenv/versions/3.11.11/bin/python3 ~/.cc_remote/bin/cc-remote notify ...\n"
+              f"   (import error: {e})", file=sys.stderr)
+        return 1
+    deps.config.load_env()
+    if not deps.config.APP_ID or not deps.config.APP_SECRET:
+        print("❌ missing Feishu creds in ~/.cc_remote/.env "
+              "(FEISHU_APP_ID / FEISHU_APP_SECRET)", file=sys.stderr)
+        return 1
+    content = _resolve_notify_content(args, sys.stdin)
+    if content is None:
+        print("❌ no message: pass it as an argument or pipe via stdin\n"
+              '   cc-remote notify "task done"   |   echo "..." | cc-remote notify',
+              file=sys.stderr)
+        return 1
+    chat_id, err = _resolve_notify_target(
+        args, deps.tmux.current_session, deps.config.CC_REMOTE_DIR)
+    if err:
+        print(f"❌ {err}", file=sys.stderr)
+        return 1
+    # Truncate to the card / text-fallback ceilings (same limits the hook uses).
+    card_limit = deps.config.MAX_CARD_CHARS
+    text_limit = deps.config.MAX_TEXT_CHARS
+    card_md = content if card_limit <= 0 or len(content) <= card_limit \
+        else content[:card_limit] + "\n…（已截断）"
+    text_fb = content if text_limit <= 0 or len(content) <= text_limit \
+        else content[:text_limit] + "\n…（已截断）"
+    title = args.title or "🔔 任务通知"
+    client = deps.feishu.build_client(deps.config.APP_ID, deps.config.APP_SECRET)
+    ok = deps.feishu.send_markdown(client, chat_id, card_md, text_fb,
+                                   header_title=title)
+    if not ok:
+        print(f"❌ send failed (chat {chat_id})", file=sys.stderr)
+        return 1
+    print(f"✅ notified chat {chat_id}")
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="cc-remote", description=__doc__,
@@ -501,6 +589,15 @@ def main():
 
     sub.add_parser("doctor", help="Self-check")
 
+    np = sub.add_parser("notify", help="Send a proactive notification card to "
+                                       "the Feishu chat driving this tmux session")
+    np.add_argument("message", nargs="?", default=None,
+                    help="Notification text (markdown). Omit to read from stdin.")
+    np.add_argument("--title", default=None,
+                    help="Card header (default: '🔔 任务通知')")
+    np.add_argument("--chat", default=None,
+                    help="Explicit chat_id target (overrides session pointer)")
+
     args = p.parse_args()
     handlers = {
         "install": cmd_install,
@@ -508,6 +605,7 @@ def main():
         "bridge": cmd_bridge,
         "projects": cmd_projects,
         "doctor": cmd_doctor,
+        "notify": cmd_notify,
     }
     sys.exit(handlers[args.cmd](args) or 0)
 
