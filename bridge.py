@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
-from ccremote import bindings, config, feishu, registry, screenshot, signals, tmux, watchdog
+from ccremote import bindings, chat_pointer, config, feishu, registry, screenshot, signals, tmux, watchdog
 
 config.load_env()
 logging.basicConfig(
@@ -180,6 +180,13 @@ def resolve_session(base_dir, chat_id, default):
     return registry.resolve_target(base_dir, default)
 
 
+def write_pointer_for(base_dir, session, chat_id):
+    """Record chat_id as the most recent driver of `session` (for notify).
+    Best-effort: a failure only logs, never affects routing."""
+    if not chat_pointer.write(base_dir, session, chat_id):
+        log.warning(f"chat pointer write failed for session {session}")
+
+
 def _send_screenshot(chat_id, session):
     """Render `session`'s pane and send it (for /read). True on confirmed send.
     Screenshots go to that session's own per-session dir."""
@@ -300,6 +307,7 @@ def handle_message(event: P2ImMessageReceiveV1) -> None:
     # chat — the currently-active session (active pointer, falling back to
     # TMUX_SESSION). Signals/screenshots are per-session.
     sess = resolve_session(config.CC_REMOTE_DIR, chat_id, config.TMUX_SESSION)
+    write_pointer_for(config.CC_REMOTE_DIR, sess, chat_id)
     sig_dir = config.signal_dir(sess)
 
     if text == "/status":

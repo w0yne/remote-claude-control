@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import bridge
-from ccremote import bindings, registry
+from ccremote import bindings, registry, chat_pointer
 
 
 # ---- resolve_session ----
@@ -99,3 +99,25 @@ def test_strip_mentions_does_not_eat_midtext_path():
 def test_strip_mentions_leading_then_midtext_kept():
     """Strip the leading mention, keep a later in-word occurrence verbatim."""
     assert bridge.strip_mentions("@_user_1 grep @_all in logs") == "grep @_all in logs"
+
+
+# ---- chat pointer write on routing ----
+# bridge records, per tmux session, the chat_id of the last message routed to
+# it, so `cc-remote notify` (running inside that session) can reply to the
+# right Feishu chat. write_pointer_for is the pure helper handle_message calls.
+
+def test_write_pointer_for_records_chat(tmp_path):
+    base = str(tmp_path)
+    bridge.write_pointer_for(base, "cc", "oc_dm_1")
+    assert chat_pointer.read(base, "cc") == "oc_dm_1"
+
+
+def test_write_pointer_for_bound_group(tmp_path):
+    """A group bound to a project records its chat_id under that project's
+    session, so notify from that session goes back to the group."""
+    base = str(tmp_path)
+    registry.add(base, "web", session="cc-web", dir="/Users/me/dev/web")
+    bindings.bind(base, "chat_web", "web")
+    sess = bridge.resolve_session(base, "chat_web", default="def")
+    bridge.write_pointer_for(base, sess, "chat_web")
+    assert chat_pointer.read(base, "cc-web") == "chat_web"
